@@ -1,0 +1,21 @@
+# Force LF line endings for files that are executed or parsed inside Linux containers.
+# This prevents the classic Docker "exec ... no such file or directory" error on Windows clones.
+
+# Shell scripts (critical - shebangs are interpreted literally by the kernel)
+*.sh                text eol=lf
+
+# Docker build files
+Dockerfile*         text eol=lf
+docker-compose*.yml text eol=lf
+.dockerignore       text eol=lf
+
+# Config files mounted into Linux services (SearXNG, etc.)
+config/**/*.yml     text eol=lf
+config/**/*.yaml    text eol=lf
+
+# Python (harmless but keeps the image clean and consistent)
+*.py                text eol=lf
+
+# Other common script/config types used at runtime or in containers
+*.bash              text eol=lf
+*.zsh               text eol=lf
