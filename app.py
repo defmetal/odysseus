@@ -54,7 +54,17 @@ app.add_middleware(
     allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE"],
-    allow_headers=["*"],
+    allow_headers=[
+        "Accept",
+        "Authorization",
+        "Content-Type",
+        "X-API-Key",
+        "X-Auth-Token",
+        "X-Odysseus-Internal-Token",
+        "X-Odysseus-Owner",
+        "X-Requested-With",
+        "X-TZ-Offset",
+    ],
 )
 
 # ========= SECURITY HEADERS MIDDLEWARE =========
@@ -600,7 +610,7 @@ app.include_router(setup_contacts_routes())
 
 def _serve_html_with_nonce(request: Request, file_path: str) -> HTMLResponse:
     """Read an HTML file and inject the CSP nonce into inline <script> tags."""
-    with open(file_path, "r") as f:
+    with open(file_path, "r", encoding="utf-8") as f:
         html = f.read()
     nonce = getattr(request.state, "csp_nonce", "")
     html = html.replace("{{CSP_NONCE}}", nonce)
@@ -669,6 +679,26 @@ async def get_version():
 @app.get("/api/health")
 async def health_check() -> Dict[str, str]:
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+
+@app.get("/api/runtime")
+async def runtime_info() -> Dict[str, object]:
+    in_docker = os.path.exists("/.dockerenv")
+    if not in_docker:
+        try:
+            with open("/proc/1/cgroup", "r", encoding="utf-8", errors="ignore") as fh:
+                cg = fh.read()
+            in_docker = any(marker in cg for marker in ("docker", "containerd", "kubepods"))
+        except Exception:
+            in_docker = False
+    ollama_url = (
+        os.getenv("OLLAMA_BASE_URL")
+        or os.getenv("OLLAMA_URL")
+        or ("http://host.docker.internal:11434/v1" if in_docker else "http://127.0.0.1:11434/v1")
+    )
+    return {
+        "in_docker": in_docker,
+        "ollama_base_url": ollama_url,
+    }
 
 # ========= LIFECYCLE =========
 
@@ -896,33 +926,60 @@ async def startup_event():
                 logger.warning(f"Nightly skill audit failed: {e}")
 
     _startup_tasks.append(asyncio.create_task(_skill_audit_nightly_loop()))
-    # Auto-detect local Ollama instance — run in background to avoid blocking startup
+    # Auto-detect Ollama — run in background to avoid blocking startup. In Docker,
+    # localhost is the container, so also try host.docker.internal.
     async def _detect_ollama():
         try:
-            import shutil
-            if not shutil.which("ollama"):
-                return
             import httpx
+            raw_candidates = [
+                os.getenv("OLLAMA_BASE_URL", ""),
+                os.getenv("OLLAMA_URL", ""),
+                "http://localhost:11434/v1",
+                "http://host.docker.internal:11434/v1",
+            ]
+            candidates = []
+            for raw in raw_candidates:
+                base = (raw or "").strip().rstrip("/")
+                if not base:
+                    continue
+                if base.endswith("/api"):
+                    base = base[:-4].rstrip("/")
+                if not base.endswith("/v1"):
+                    base = base + "/v1"
+                if base not in candidates:
+                    candidates.append(base)
+
+            found_base = ""
             async with httpx.AsyncClient() as client:
-                r = await client.get("http://localhost:11434/v1/models", timeout=3)
-                if r.status_code != 200:
-                    return
+                for base in candidates:
+                    try:
+                        r = await client.get(base + "/models", timeout=2)
+                        if r.status_code == 200:
+                            found_base = base
+                            break
+                    except Exception:
+                        continue
+            if not found_base:
+                return
             from core.database import SessionLocal, ModelEndpoint
             db = SessionLocal()
             try:
-                existing = db.query(ModelEndpoint).filter(
-                    ModelEndpoint.base_url == "http://localhost:11434/v1"
-                ).first()
+                existing = None
+                for base in candidates:
+                    existing = db.query(ModelEndpoint).filter(ModelEndpoint.base_url == base).first()
+                    if existing:
+                        break
                 if not existing:
+                    host = found_base.replace("http://", "").replace("https://", "").split("/")[0]
                     ep = ModelEndpoint(
                         id=str(uuid.uuid4())[:8],
-                        name="Ollama (local)",
-                        base_url="http://localhost:11434/v1",
+                        name="Ollama" if host.startswith("localhost") else f"Ollama ({host})",
+                        base_url=found_base,
                         is_enabled=True,
                     )
                     db.add(ep)
                     db.commit()
-                    logger.info("Auto-added Ollama endpoint (localhost:11434)")
+                    logger.info(f"Auto-added Ollama endpoint ({found_base})")
             finally:
                 db.close()
         except Exception as e:
