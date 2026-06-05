@@ -4,6 +4,7 @@
 import uiModule from './ui.js';
 import settingsModule from './settings.js';
 import { providerLogo } from './providers.js';
+import { sortModelObjects } from './modelSort.js';
 
 let initialized = false;
 let modalEl = null;
@@ -53,6 +54,7 @@ async function loadUsers() {
           </div>
         </div>
         <div style="display:flex;gap:8px;align-items:center;">
+          <button class="admin-btn-sm" data-adm-rename-user="${esc(u.username)}" style="font-size:11px;">Rename</button>
           ${u.is_admin ? '' : `<button class="admin-btn-delete" data-adm-del-user="${esc(u.username)}" style="font-size:11px;">Remove</button>`}
           ${u.is_admin ? '' : '<svg class="admin-user-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.3;transition:transform 0.2s,opacity 0.2s;"><polyline points="6 9 12 15 18 9"/></svg>'}
         </div>
@@ -106,7 +108,7 @@ async function loadUsers() {
         // Toggle panel visibility + rotate chevron + load models
         let _modelsLoaded = false;
         header.addEventListener('click', (e) => {
-          if (e.target.closest('.admin-btn-delete')) return;
+          if (e.target.closest('.admin-btn-delete, [data-adm-rename-user]')) return;
           privPanel.classList.toggle('hidden');
           const chevron = header.querySelector('.admin-user-chevron');
           if (chevron) {
@@ -140,6 +142,42 @@ async function loadUsers() {
           };
           if (input.type === 'checkbox') input.addEventListener('change', handler);
           else input.addEventListener('change', handler);
+        });
+      }
+
+      // Rename button
+      const renameBtn = row.querySelector('[data-adm-rename-user]');
+      if (renameBtn) {
+        renameBtn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const oldUsername = renameBtn.dataset.admRenameUser;
+          const next = await uiModule.styledPrompt(`Rename "${oldUsername}"`, {
+            defaultValue: oldUsername,
+            placeholder: 'New username',
+            confirmText: 'Rename',
+          });
+          const username = (next || '').trim();
+          if (!username || username === oldUsername) return;
+          try {
+            const res = await fetch(`/api/auth/users/${encodeURIComponent(oldUsername)}/rename`, {
+              method: 'PUT',
+              credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ username }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+              uiModule.showError(data.detail || 'Failed to rename user');
+              return;
+            }
+            if (data.renamed_self) {
+              window.location.reload();
+              return;
+            }
+            loadUsers();
+          } catch (err) {
+            uiModule.showError('Failed to rename user');
+          }
         });
       }
 
@@ -179,7 +217,7 @@ async function _loadModelsForUser(username, allowedSet, privPanel) {
       return;
     }
     const allEmpty = allowedSet.size === 0;
-    listEl.innerHTML = allModels.map(m => {
+    listEl.innerHTML = sortModelObjects(allModels).map(m => {
       const checked = allEmpty || allowedSet.has(m.mid) ? 'checked' : '';
       return `<label>
         <input type="checkbox" class="priv-model-cb" data-mid="${esc(m.mid)}" ${checked}>
@@ -333,12 +371,15 @@ async function loadEndpoints() {
   const listLegacy = el('adm-epList');
   // Refresh model picker so new endpoints show up in chat
   if (window.modelsModule && window.modelsModule.refreshModels) {
-    window.modelsModule.refreshModels(true);
+    window.modelsModule.refreshModels();
     setTimeout(() => {
       if (window.sessionModule && window.sessionModule.updateModelPicker) {
         window.sessionModule.updateModelPicker();
       }
     }, 1500);
+  }
+  if (settingsModule && typeof settingsModule.refreshAiModelEndpoints === 'function') {
+    settingsModule.refreshAiModelEndpoints();
   }
   try {
     const res = await fetch('/api/model-endpoints', { credentials: 'same-origin' });
@@ -370,12 +411,15 @@ async function loadEndpoints() {
           ? `<span class="admin-badge">${visibleCount}/${totalCount} models enabled</span>`
           : '<span class="admin-badge admin-badge-off">offline</span>';
       const justAddedClass = (_recentlyAddedEpId && String(ep.id) === _recentlyAddedEpId) ? ' adm-ep-just-added' : '';
+      const category = ep.category || (_isLocalEndpoint(ep.base_url) ? 'local' : 'api');
+      const kindLabel = ep.endpoint_kind && ep.endpoint_kind !== 'auto' ? ep.endpoint_kind.toUpperCase() : '';
       return `
         <div class="admin-user-row${ep.is_enabled ? '' : ' admin-ep-disabled'}${justAddedClass}" data-adm-ep-id="${ep.id}">
           <div style="display:flex;align-items:center;justify-content:space-between;${hasModels ? 'cursor:pointer;' : ''}padding:4px 0;" data-adm-ep-header="${ep.id}">
             <div class="admin-user-info" style="flex:1;flex-wrap:wrap;gap:0.3rem;">
               <span class="admin-user-name">${esc(ep.name)}</span>
               ${ep.model_type === 'image' ? '<span class="admin-badge" style="background:color-mix(in srgb, var(--accent) 20%, transparent);color:var(--accent);">Image</span>' : ''}
+              ${kindLabel ? `<span class="admin-badge">${esc(kindLabel)}</span>` : ''}
               ${statusBadge}
               ${ep.is_enabled ? '' : '<span class="admin-badge admin-badge-off">disabled</span>'}
               ${hasModels ? '<span style="font-size:10px;opacity:0.4;">Click to manage models</span>' : ''}
@@ -386,7 +430,7 @@ async function loadEndpoints() {
               ${hasModels ? '<svg class="admin-user-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.3;transition:transform 0.2s,opacity 0.2s;"><polyline points="6 9 12 15 18 9"/></svg>' : ''}
             </div>
           </div>
-          <div class="admin-ep-detail">${esc(ep.base_url)}${_isLocalEndpoint(ep.base_url) ? `<button type="button" class="admin-ep-copy-btn" data-adm-copy-url="${esc(ep.base_url)}" title="Copy URL" aria-label="Copy URL" style="background:none;border:none;padding:0 2px;margin-left:6px;cursor:pointer;color:inherit;opacity:0.45;vertical-align:-2px;line-height:1;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>` : ''}${ep.has_key ? ' (key set)' : ''}</div>
+          <div class="admin-ep-detail">${esc(ep.base_url)}${category === 'local' ? `<button type="button" class="admin-ep-copy-btn" data-adm-copy-url="${esc(ep.base_url)}" title="Copy URL" aria-label="Copy URL" style="background:none;border:none;padding:0 2px;margin-left:6px;cursor:pointer;color:inherit;opacity:0.45;vertical-align:-2px;line-height:1;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>` : ''}${ep.has_key ? ' (key set)' : ''}</div>
           ${hasModels ? `<div class="mcp-tools-panel hidden" data-adm-ep-models-panel="${ep.id}"></div>` : ''}
         </div>`;
     });
@@ -405,7 +449,7 @@ async function loadEndpoints() {
       container.innerHTML = indices.map(i => rowHtml[i]).join('');
     };
     const localIdx = [], apiIdx = [];
-    data.forEach((ep, i) => (_isLocalEndpoint(ep.base_url) ? localIdx : apiIdx).push(i));
+    data.forEach((ep, i) => ((ep.category || (_isLocalEndpoint(ep.base_url) ? 'local' : 'api')) === 'local' ? localIdx : apiIdx).push(i));
     // Sort each section: enabled endpoints first, disabled at the bottom.
     // Preserve original order within each group via stable sort.
     const _sortByEnabled = (a, b) => Number(!!data[b].is_enabled) - Number(!!data[a].is_enabled);
@@ -511,21 +555,48 @@ async function loadEndpoints() {
           } catch (_) {}
           panel.appendChild(_ld);
           const _stopSpin = () => { try { _modelsSpin && _modelsSpin.stop(); } catch (_) {} };
-          try {
-            const res = await fetch(`/api/model-endpoints/${epId}/models`, { credentials: 'same-origin' });
-            const models = await res.json();
-            _stopSpin();
-            if (!models.length) { panel.innerHTML = '<span style="opacity:0.5;font-size:11px;">No models</span>'; return; }
-            const hiddenSet = new Set(models.filter(m => m.is_hidden).map(m => m.id));
-            const showSearch = models.length >= 8;
+          const _loadingHtml = (label) => `<span style="opacity:0.55;font-size:11px;display:inline-flex;align-items:center;gap:8px;">${esc(label)}</span>`;
+          const renderModels = (models, warning = '') => {
+            const sortedModels = sortModelObjects(models);
+            const warningHtml = warning ? `<div class="admin-error" style="font-size:11px;margin:6px 0;">${esc(warning)}</div>` : '';
+            const attachRefresh = () => {
+              panel.querySelector(`[data-ep-refresh-models="${epId}"]`)?.addEventListener('click', async (e) => {
+                e.preventDefault();
+                panel.innerHTML = _loadingHtml('Refreshing models...');
+                try {
+                  const res = await fetch(`/api/model-endpoints/${epId}/models?refresh=true&refresh_timeout=60`, { credentials: 'same-origin' });
+                  const refreshWarning = res.headers.get('X-Model-Refresh-Warning') || '';
+                  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                  const refreshedModels = await res.json();
+                  renderModels(refreshedModels, refreshWarning);
+                  if (refreshWarning && uiModule?.showToast) uiModule.showToast(refreshWarning, 6000);
+                } catch (_) {
+                  renderModels(sortedModels, 'Model refresh failed; kept cached models.');
+                }
+              });
+            };
+            if (!sortedModels.length) {
+              panel.innerHTML = `<div class="mcp-tools-header">
+                <span>Models</span>
+                <span style="display:flex;gap:8px;align-items:center;">
+                  <span class="mcp-tools-count">0/0 enabled</span>
+                  <a href="#" data-ep-refresh-models="${epId}">Refresh</a>
+                </span>
+              </div>${warningHtml}<span style="opacity:0.5;font-size:11px;">No models</span>`;
+              attachRefresh();
+              return;
+            }
+            const hiddenSet = new Set(sortedModels.filter(m => m.is_hidden).map(m => m.id));
+            const showSearch = sortedModels.length >= 8;
             panel.innerHTML = `<div class="mcp-tools-header">
               <span>Models</span>
               <span style="display:flex;gap:8px;align-items:center;">
-                <span class="mcp-tools-count">${models.length - hiddenSet.size}/${models.length} enabled</span>
+                <span class="mcp-tools-count">${sortedModels.length - hiddenSet.size}/${sortedModels.length} enabled</span>
+                <a href="#" data-ep-refresh-models="${epId}">Refresh</a>
                 <a href="#" data-ep-select-all="${epId}">All</a>
                 <a href="#" data-ep-select-none="${epId}">None</a>
               </span>
-            </div>${showSearch ? `<input type="search" class="mcp-tools-search" placeholder="Search ${models.length} models..." data-ep-search="${epId}">` : ''}<div class="mcp-tools-list">` + models.map(m =>
+            </div>${warningHtml}${showSearch ? `<input type="search" class="mcp-tools-search" placeholder="Search ${sortedModels.length} models..." data-ep-search="${epId}">` : ''}<div class="mcp-tools-list">` + sortedModels.map(m =>
               `<label title="${esc(m.id)}" data-ep-model-row data-search="${esc((m.display + ' ' + m.id).toLowerCase())}" class="adm-model-row">
                 <input type="checkbox" class="adm-cb-hidden" data-ep-model-id="${esc(m.id)}" ${!m.is_hidden ? 'checked' : ''}>
                 <span class="adm-check-dot" aria-hidden="true"></span>
@@ -538,6 +609,7 @@ async function loadEndpoints() {
                 row.style.display = (!needle || row.dataset.search.includes(needle)) ? '' : 'none';
               });
             };
+            attachRefresh();
             panel.querySelector(`[data-ep-search="${epId}"]`)?.addEventListener('input', (e) => filterRows(e.target.value));
             panel.querySelector(`[data-ep-select-all="${epId}"]`)?.addEventListener('click', (e) => {
               e.preventDefault();
@@ -556,6 +628,13 @@ async function loadEndpoints() {
             panel.querySelectorAll('input[type=checkbox]').forEach(cb => {
               cb.addEventListener('change', () => _saveEpModelState(epId, panel));
             });
+          };
+          try {
+            const res = await fetch(`/api/model-endpoints/${epId}/models`, { credentials: 'same-origin' });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const models = await res.json();
+            _stopSpin();
+            renderModels(models);
           } catch (e) { _stopSpin(); panel.innerHTML = '<span class="admin-error" style="font-size:11px;">Failed to load models</span>'; }
         }
       });
@@ -586,12 +665,16 @@ async function _saveEpModelState(epId, panel) {
       const badge = row.querySelector('.admin-badge');
       if (badge && !badge.classList.contains('admin-badge-off')) badge.textContent = `${total - hidden.length}/${total} models enabled`;
     }
+    if (settingsModule && typeof settingsModule.refreshAiModelEndpoints === 'function') {
+      settingsModule.refreshAiModelEndpoints();
+    }
   } catch (e) { /* silent */ }
 }
 
 function initEndpointForm() {
   const provider = el('adm-epProvider');
   const urlInput = el('adm-epUrl');
+  const kindSel = el('adm-epKind');
 
   // Custom provider picker — mirrors the (now hidden) <select id="adm-epProvider">
   // so the rest of this function (which reads provider.value and dispatches
@@ -643,14 +726,20 @@ function initEndpointForm() {
   provider.addEventListener('change', () => {
     if (provider.value) urlInput.value = provider.value;
     else urlInput.value = '';
+    if (kindSel) kindSel.value = provider.value ? 'api' : 'proxy';
   });
   urlInput.addEventListener('input', () => {
     if (provider.value && urlInput.value.trim() !== provider.value) {
       provider.value = '';
+      if (kindSel) kindSel.value = 'proxy';
       _renderPickerMenu();
       _syncPickerCurrent();
     }
   });
+  if (kindSel) kindSel.value = provider.value ? 'api' : (kindSel.value || 'proxy');
+  function _apiEndpointKind() {
+    return (kindSel && kindSel.value) ? kindSel.value : (provider.value ? 'api' : 'proxy');
+  }
   function _normalizeBaseUrl(raw) {
     let u = raw.trim();
     // Fix common protocol typos
@@ -665,12 +754,19 @@ function initEndpointForm() {
     // Strip trailing paths that shouldn't be in a base URL
     u = u.replace(/\/v1\/(models|chat\/completions|completions|messages)\/?$/i, '/v1');
     u = u.replace(/\/(models|chat\/completions|completions|v1\/messages)\/?$/i, '');
+    u = u.replace(/\/api\/(chat|tags|generate)\/?$/i, '/api');
     // Fix double /v1/v1
     u = u.replace(/\/v1\/v1$/, '/v1');
     // Strip query params and fragments
     u = u.split('?')[0].split('#')[0];
+    try {
+      const parsed = new URL(u);
+      if (parsed.hostname.endsWith('ollama.com')) {
+        u = 'https://ollama.com/api';
+      }
+    } catch(e) {}
     // Ensure /v1 suffix for bare host:port URLs (not cloud providers)
-    if (!u.includes('api.') && !u.includes('openrouter') && !u.endsWith('/v1')) {
+    if (!u.includes('api.') && !u.includes('openrouter') && !u.includes('ollama.com') && !u.endsWith('/v1')) {
       try {
         const parsed = new URL(u);
         if (!parsed.pathname || parsed.pathname === '/') {
@@ -732,6 +828,8 @@ function initEndpointForm() {
       try {
         const fd = new FormData();
         fd.append('base_url', url);
+        fd.append('endpoint_kind', _apiEndpointKind());
+        fd.append('model_refresh_timeout', '30');
         if (apiKey) fd.append('api_key', apiKey);
         const res = await fetch('/api/model-endpoints/test', {
           method: 'POST',
@@ -776,16 +874,25 @@ function initEndpointForm() {
     try {
       const fd = new FormData();
       fd.append('base_url', url);
+      const endpointKind = _apiEndpointKind();
+      fd.append('endpoint_kind', endpointKind);
+      fd.append('model_refresh_mode', endpointKind === 'proxy' ? 'manual' : 'auto');
+      fd.append('model_refresh_timeout', '30');
       if (apiKey) fd.append('api_key', apiKey);
+      if (provider.value && provider.selectedOptions && provider.selectedOptions[0]) {
+        fd.append('name', provider.selectedOptions[0].textContent.trim());
+      }
       const epType = el('adm-epType');
       if (epType) fd.append('model_type', epType.value);
-      fd.append('skip_probe', 'false');
+      if (provider.value && /openrouter\.ai|ollama\.com/i.test(provider.value)) fd.append('require_models', 'true');
+      else fd.append('skip_probe', 'false');
       const res = await fetch('/api/model-endpoints', { method: 'POST', body: fd, credentials: 'same-origin' });
       const d = await res.json();
       if (res.ok) {
         const count = d.models ? d.models.length : 0;
         urlInput.value = ''; urlInput.style.display = '';
         el('adm-epApiKey').value = ''; provider.value = '';
+        if (kindSel) kindSel.value = 'proxy';
         if (epType) epType.value = 'llm';
         if (d.id) _recentlyAddedEpId = String(d.id);
         await loadEndpoints();
@@ -815,11 +922,14 @@ function initEndpointForm() {
       const raw = (el('adm-epLocalUrl').value || '').trim();
       if (!raw) { msg.textContent = 'Enter a base URL to test'; msg.className = 'admin-error'; return; }
       const url = _normalizeBaseUrl(raw);
+      const keyEl = el('adm-epLocalApiKey');
+      const apiKey = keyEl ? keyEl.value.trim() : '';
       localTestBtn.disabled = true;
       localTestBtn.textContent = 'Testing...';
       try {
         const fd = new FormData();
         fd.append('base_url', url);
+        if (apiKey) fd.append('api_key', apiKey);
         const res = await fetch('/api/model-endpoints/test', { method: 'POST', body: fd, credentials: 'same-origin' });
         const d = await res.json();
         _renderEndpointTestResult(msg, res, d);
@@ -838,10 +948,15 @@ function initEndpointForm() {
       const raw = (el('adm-epLocalUrl').value || '').trim();
       if (!raw) { msg.textContent = 'Enter a base URL (e.g. http://localhost:8002/v1)'; msg.className = 'admin-error'; return; }
       const url = _normalizeBaseUrl(raw);
+      const keyEl = el('adm-epLocalApiKey');
+      const apiKey = keyEl ? keyEl.value.trim() : '';
       localAddBtn.disabled = true; localAddBtn.textContent = 'Adding...';
       try {
         const fd = new FormData();
         fd.append('base_url', url);
+        if (apiKey) fd.append('api_key', apiKey);
+        fd.append('endpoint_kind', 'local');
+        fd.append('model_refresh_mode', 'auto');
         const lt = el('adm-epLocalType');
         if (lt) fd.append('model_type', lt.value);
         fd.append('skip_probe', 'false');
@@ -849,6 +964,7 @@ function initEndpointForm() {
         const d = await res.json();
         if (res.ok) {
           el('adm-epLocalUrl').value = '';
+          if (keyEl) keyEl.value = '';
           if (lt) lt.value = 'llm';
           if (d.id) _recentlyAddedEpId = String(d.id);
           await loadEndpoints();
@@ -912,24 +1028,34 @@ function initEndpointForm() {
         const data = await res.json();
         const items = data.items || [];
         if (!items.length) {
-          msg.textContent = 'No model servers found. Make sure vLLM, llama.cpp, SGLang, or Ollama is running. Docker users may need OLLAMA_HOST=0.0.0.0:11434.';
+          msg.textContent = 'No model servers found. Make sure vLLM, llama.cpp, SGLang, or Ollama is running. Docker users may need Ollama bound to a trusted reachable interface.';
           msg.className = 'admin-error';
         } else {
-          // Auto-add each discovered endpoint
+          // Auto-add each discovered endpoint. Server dedupes on base_url
+          // and returns `existing: true` for already-registered ones.
           let added = 0;
+          let skipped = 0;
           for (const item of items) {
             const base = item.url.replace('/chat/completions', '').replace(/\/$/, '');
             const fd = new FormData();
             fd.append('base_url', base);
+            fd.append('endpoint_kind', 'local');
+            fd.append('model_refresh_mode', 'auto');
             fd.append('skip_probe', 'false');
             const r = await fetch('/api/model-endpoints', { method: 'POST', body: fd });
             if (r.ok) {
-              added++;
-              try { const dd = await r.json(); if (dd && dd.id) _recentlyAddedEpId = String(dd.id); } catch (_) {}
+              try {
+                const dd = await r.json();
+                if (dd && dd.existing) { skipped++; }
+                else { added++; if (dd && dd.id) _recentlyAddedEpId = String(dd.id); }
+              } catch (_) { added++; }
             }
           }
           const totalModels = items.reduce((n, i) => n + (i.models ? i.models.length : 0), 0);
-          msg.innerHTML = `Found ${items.length} server${items.length !== 1 ? 's' : ''} with ${totalModels} model${totalModels !== 1 ? 's' : ''}` + (added ? ` — added ${added} new` : ' (already added)');
+          const parts = [`Found ${items.length} server${items.length !== 1 ? 's' : ''} with ${totalModels} model${totalModels !== 1 ? 's' : ''}`];
+          if (added) parts.push(`added ${added} new`);
+          if (skipped) parts.push(`${skipped} already added`);
+          msg.innerHTML = parts.join(' — ');
           msg.className = 'admin-success';
           loadEndpoints();
         }

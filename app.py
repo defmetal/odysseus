@@ -1,14 +1,48 @@
 # app.py — slim orchestrator
-from dotenv import load_dotenv
-load_dotenv()
+import mimetypes
 import os
+
+
+def register_static_mime_types() -> None:
+    """Force stable JS module MIME types across platforms.
+
+    Some native Windows setups inherit stale/incorrect registry mappings for
+    ``.js``/``.mjs``, which can make Starlette serve ES modules with a non-JS
+    ``Content-Type`` and cause the UI to load but fail on click. Re-register the
+    standard MIME types at startup so static assets are served consistently.
+    """
+
+    mimetypes.add_type("text/javascript", ".js")
+    mimetypes.add_type("application/javascript", ".mjs")
+
+
+register_static_mime_types()
+
+# Windows: force HuggingFace/fastembed to COPY model files instead of symlinking.
+# On a network-share/UNC data dir Windows can't follow HF's symlinks ([WinError
+# 1463]), so the ONNX embedding model fails to load. huggingface_hub reads this
+# at import time, so set it before anything pulls it in. (Mirrored in
+# src/embeddings.py for non-server entrypoints.)
+if os.name == "nt":
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+
+from dotenv import load_dotenv
+# encoding="utf-8-sig" tolerates a UTF-8 BOM in .env — a common Windows gotcha
+# when the file is saved from Notepad. Without this, the first key parses as
+# "﻿AUTH_ENABLED" instead of "AUTH_ENABLED", so AUTH_ENABLED=false (etc.)
+# is silently ignored and the user is unexpectedly forced to log in (issue #142).
+# utf-8-sig reads plain UTF-8 (no BOM) identically, so this is safe everywhere.
+load_dotenv(encoding="utf-8-sig")
 import uuid
 
 import asyncio
 import logging
+import secrets
 from datetime import datetime
 from typing import Dict
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,6 +75,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ========= APP =========
+# Lifespan is defined below (after all helpers it references are in scope)
+# and passed to FastAPI so we can use the modern context-manager lifecycle
+# instead of the deprecated @app.on_event("startup"/"shutdown") decorators.
 app = FastAPI(
     title="AI Chat Application",
     description="Comprehensive AI chat with memory, research, and multi-modal capabilities",
@@ -118,6 +155,8 @@ auth_manager = AuthManager()
 app.state.auth_manager = auth_manager
 AUTH_ENABLED = os.getenv("AUTH_ENABLED", "true").lower() != "false"
 LOCALHOST_BYPASS = os.getenv("LOCALHOST_BYPASS", "false").lower() == "true"
+if LOCALHOST_BYPASS:
+    logger.warning("LOCALHOST_BYPASS is enabled, loopback requests bypass authentication. Do not expose this instance to a network.")
 
 if AUTH_ENABLED:
     AUTH_EXEMPT_EXACT = {
@@ -134,9 +173,25 @@ if AUTH_ENABLED:
         "/login",
     }
     AUTH_EXEMPT_PREFIXES = ["/static"]
+    # Dynamic paths whose own handler proves identity via a path-embedded
+    # secret instead of the session/bearer auth. The route handler at
+    # routes/task_routes.py validates the per-task `webhook_token` itself
+    # and returns 404 on mismatch, so the path is the credential — the
+    # UI labels these URLs "no auth needed" precisely because external
+    # callers (Zapier, n8n, curl) can't supply a session cookie. Without
+    # this exemption AuthMiddleware rejects every POST with 401 before
+    # the token is ever checked.
+    import re as _re
+    AUTH_EXEMPT_PATTERNS = [
+        _re.compile(r"^/api/tasks/[^/]+/webhook/[^/]+/?$"),
+    ]
 
     def _is_auth_exempt(path: str) -> bool:
-        return path in AUTH_EXEMPT_EXACT or any(path.startswith(p) for p in AUTH_EXEMPT_PREFIXES)
+        if path in AUTH_EXEMPT_EXACT:
+            return True
+        if any(path.startswith(p) for p in AUTH_EXEMPT_PREFIXES):
+            return True
+        return any(p.match(path) for p in AUTH_EXEMPT_PATTERNS)
 
     # In-memory token cache: prefix → list[(token_id, token_hash, owner, scopes)]. The DB
     # query was running on every API-bearer request and scanning bcrypt
@@ -170,6 +225,31 @@ if AUTH_ENABLED:
         _token_cache.update(new_map)
         app.state._token_cache_dirty = False
 
+    # Headers that prove a request was forwarded by a proxy/tunnel (cloudflared,
+    # nginx, Caddy, Tailscale Funnel, …). cloudflared connects to the app FROM
+    # 127.0.0.1, so without this check every tunneled request would look like
+    # loopback and could bypass auth.
+    _PROXY_FWD_HEADERS = (
+        "cf-connecting-ip", "cf-ray", "cf-visitor",
+        "x-forwarded-for", "x-forwarded-host", "x-real-ip", "forwarded",
+    )
+
+    def _is_trusted_loopback(request: Request) -> bool:
+        """True ONLY for a DIRECT loopback connection with no proxy/tunnel
+        forwarding headers. A bare ``client.host in ('127.0.0.1','::1')`` check is
+        unsafe behind a Cloudflare tunnel / reverse proxy: those connect from
+        loopback, so a remote visitor would otherwise inherit local trust and
+        slip past LOCALHOST_BYPASS or spoof the internal-tool path. Odysseus's own
+        in-process agent loopback calls carry none of these headers, so they still
+        qualify."""
+        host = request.client.host if request.client else None
+        if host not in ("127.0.0.1", "::1"):
+            return False
+        for _h in _PROXY_FWD_HEADERS:
+            if request.headers.get(_h):
+                return False
+        return True
+
     class AuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
             path = request.url.path
@@ -182,26 +262,28 @@ if AUTH_ENABLED:
             try:
                 from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN as _ITT
                 _hdr = request.headers.get(INTERNAL_TOOL_HEADER)
-                _client_host = request.client.host if request.client else None
-                if _hdr and _hdr == _ITT and _client_host in ("127.0.0.1", "::1"):
+                if _hdr and secrets.compare_digest(_hdr, _ITT) and _is_trusted_loopback(request):
                     # Impersonation: when the agent's loopback call sets
-                    # X-Odysseus-Owner, attribute the request to that
-                    # user so notes/calendar/etc. land in their account
-                    # instead of being owned by "internal-tool" (which
-                    # made the agent's POSTs invisible to the user that
-                    # asked for them).
+                    # X-Odysseus-Owner, attribute the request to that user only
+                    # if they exist. Authorization checks remain separate; this
+                    # is just owner attribution for notes/calendar/etc.
                     _impersonate = (request.headers.get("X-Odysseus-Owner") or "").strip()
-                    request.state.current_user = _impersonate or "internal-tool"
+                    _auth_mgr = getattr(request.app.state, "auth_manager", None) or auth_manager
+                    if _impersonate and _impersonate in getattr(_auth_mgr, "users", {}):
+                        request.state.current_user = _impersonate
+                    else:
+                        request.state.current_user = "internal-tool"
                     request.state.api_token = False
                     return await call_next(request)
             except Exception:
                 pass
-            # Allow localhost requests (internal service calls from heartbeats etc.)
-            # Disable with LOCALHOST_BYPASS=false when exposing via reverse proxy / Tailscale Funnel
-            if LOCALHOST_BYPASS:
-                client_host = request.client.host if request.client else None
-                if client_host in ("127.0.0.1", "::1"):
-                    return await call_next(request)
+            # Allow DIRECT localhost requests (internal service calls from
+            # heartbeats etc.). Tunnel/proxy-forwarded requests are excluded by
+            # _is_trusted_loopback so LOCALHOST_BYPASS can't be abused over a
+            # Cloudflare tunnel / reverse proxy. Keep LOCALHOST_BYPASS=false for
+            # network-exposed deployments regardless.
+            if LOCALHOST_BYPASS and _is_trusted_loopback(request):
+                return await call_next(request)
             if not auth_manager.is_configured:
                 # No users yet — redirect to login for first-time setup
                 if not path.startswith("/api/"):
@@ -355,15 +437,26 @@ async def serve_generated_image(filename: str, request: Request):
 from services.youtube import init_youtube
 init_youtube()
 
-# ========= RAG (vector document RAG — DISABLED) =========
-# VectorRAG (ChromaDB-backed personal-document semantic search) is unused
-# (0 directories ever indexed) and its chromadb 1.4.1 / pydantic 2.12 client
-# can't even instantiate — it threw at init and cost ~30s of startup waiting on
-# the embedding probe. Disabled. All callers already guard on rag_available /
-# `if rag_manager`, so personal-doc routes degrade cleanly.
-rag_manager = None
-rag_available = False
-logger.info("Vector document RAG disabled (unused)")
+# ========= RAG (vector document RAG) =========
+# VectorRAG (ChromaDB-backed personal-document semantic search). Initialized
+# lazily via get_rag_manager() — returns None if ChromaDB isn't reachable
+# (no server running on the configured host:port), in which case personal-doc
+# routes return a clean 503 instead of busy-retrying every request.
+#
+# Note: this was previously hardcoded off because chromadb 1.4.1 / pydantic
+# 2.12 were mutually incompatible at the time. With the current pins
+# (chromadb 1.5.x + pydantic 2.13.x) the init works and Personal Docs
+# (POST /api/personal/add_directory etc.) is functional again.
+from src.rag_singleton import get_rag_manager
+rag_manager = get_rag_manager()
+rag_available = rag_manager is not None
+if rag_available:
+    logger.info("Vector document RAG initialized")
+else:
+    logger.info(
+        "Vector document RAG not available at startup "
+        "(ChromaDB may not be reachable yet — routes will retry lazily)"
+    )
 
 # ========= IMPORT CONFIG =========
 from src.config import config
@@ -444,7 +537,8 @@ app.include_router(setup_admin_wipe_routes(session_manager))
 
 # Memory
 from routes.memory_routes import setup_memory_routes
-app.include_router(setup_memory_routes(memory_manager, session_manager, memory_vector=memory_vector))
+memory_router = setup_memory_routes(memory_manager, session_manager, memory_vector=memory_vector)
+app.include_router(memory_router)
 from routes.skills_routes import setup_skills_routes
 app.include_router(setup_skills_routes(skills_manager))
 
@@ -507,7 +601,8 @@ logger.info("STT service initialized (provider managed via settings)")
 
 # Documents (artifacts/canvas)
 from routes.document_routes import setup_document_routes
-app.include_router(setup_document_routes(session_manager, upload_handler))
+document_router = setup_document_routes(session_manager, upload_handler)
+app.include_router(document_router)
 
 # Signatures (reusable image stamps)
 from routes.signature_routes import setup_signature_routes
@@ -534,7 +629,8 @@ app.include_router(setup_assistant_routes(task_scheduler))
 
 # Calendar (CalDAV)
 from routes.calendar_routes import setup_calendar_routes
-app.include_router(setup_calendar_routes())
+calendar_router = setup_calendar_routes()
+app.include_router(calendar_router)
 
 # Shell (user-facing command execution)
 from routes.shell_routes import setup_shell_routes
@@ -597,7 +693,22 @@ app.include_router(setup_note_routes(task_scheduler))
 
 # Email
 from routes.email_routes import setup_email_routes
-app.include_router(setup_email_routes())
+email_router = setup_email_routes()
+app.include_router(email_router)
+
+# Codex integration — HTTP surface for the Codex plugin/MCP bridge. Reuses
+# api_token scopes (todos:read|write, email:read|draft|send) so external
+# Codex sessions can only touch the data the user explicitly allowed. Mounted
+# AFTER email so the codex_routes can borrow the email router for shared
+# search/threading helpers.
+from routes.codex_routes import setup_codex_routes, setup_claude_routes
+app.include_router(setup_codex_routes(
+    email_router=email_router,
+    memory_router=memory_router,
+    calendar_router=calendar_router,
+    document_router=document_router,
+))
+app.include_router(setup_claude_routes())
 
 from routes.vault_routes import setup_vault_routes
 app.include_router(setup_vault_routes())
@@ -605,6 +716,9 @@ app.include_router(setup_vault_routes())
 # Contacts (CardDAV)
 from routes.contacts_routes import setup_contacts_routes
 app.include_router(setup_contacts_routes())
+
+from companion import setup_companion_routes
+app.include_router(setup_companion_routes())
 
 # ========= ROUTES (kept in app.py) =========
 
@@ -680,6 +794,17 @@ async def get_version():
 async def health_check() -> Dict[str, str]:
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
+@app.get("/api/ready")
+async def readiness_check() -> JSONResponse:
+    """Readiness / integrity self-check — DB, data dir, local-first storage.
+
+    Unlike /api/health (liveness), this returns 503 unless every critical
+    subsystem is whole, so an orchestrator can gate traffic on real readiness.
+    """
+    from src.readiness import check_readiness
+    result = check_readiness()
+    return JSONResponse(status_code=200 if result.get("ready") else 503, content=result)
+
 @app.get("/api/runtime")
 async def runtime_info() -> Dict[str, object]:
     in_docker = os.path.exists("/.dockerenv")
@@ -702,8 +827,19 @@ async def runtime_info() -> Dict[str, object]:
 
 # ========= LIFECYCLE =========
 
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def _lifespan(app):
+    """Modern lifespan context manager replacing deprecated @app.on_event."""
+    # ── STARTUP ──
+    await _startup_event()
+    yield
+    # ── SHUTDOWN ──
+    await _shutdown_event()
+
+app.router.lifespan_context = _lifespan
+
+
+async def _startup_event():
     global upload_cleanup_task
     logger.info("Application starting up...")
     webhook_manager.set_loop(asyncio.get_running_loop())
@@ -764,7 +900,6 @@ async def startup_event():
             from src.tool_index import get_tool_index
             idx = await asyncio.to_thread(get_tool_index)
             if idx:
-                await asyncio.to_thread(idx.index_builtin_tools)
                 await asyncio.to_thread(idx.get_tools_for_query, "warmup", 8)
                 logger.info("[startup] Tool index pre-warmed")
         except Exception as e:
@@ -808,7 +943,7 @@ async def startup_event():
         try:
             import json as _json
             auth_path = "data/auth.json"
-            with open(auth_path) as f:
+            with open(auth_path, encoding="utf-8") as f:
                 users = _json.load(f).get("users", {})
             owners.update(users.keys())
         except Exception as e:
@@ -855,7 +990,7 @@ async def startup_event():
     try:
         import json as _json
         auth_path = "data/auth.json"
-        with open(auth_path) as f:
+        with open(auth_path, encoding="utf-8") as f:
             users = _json.load(f).get("users", {})
         primary_owner = None
         for uname, udata in users.items():
@@ -926,69 +1061,9 @@ async def startup_event():
                 logger.warning(f"Nightly skill audit failed: {e}")
 
     _startup_tasks.append(asyncio.create_task(_skill_audit_nightly_loop()))
-    # Auto-detect Ollama — run in background to avoid blocking startup. In Docker,
-    # localhost is the container, so also try host.docker.internal.
-    async def _detect_ollama():
-        try:
-            import httpx
-            raw_candidates = [
-                os.getenv("OLLAMA_BASE_URL", ""),
-                os.getenv("OLLAMA_URL", ""),
-                "http://localhost:11434/v1",
-                "http://host.docker.internal:11434/v1",
-            ]
-            candidates = []
-            for raw in raw_candidates:
-                base = (raw or "").strip().rstrip("/")
-                if not base:
-                    continue
-                if base.endswith("/api"):
-                    base = base[:-4].rstrip("/")
-                if not base.endswith("/v1"):
-                    base = base + "/v1"
-                if base not in candidates:
-                    candidates.append(base)
-
-            found_base = ""
-            async with httpx.AsyncClient() as client:
-                for base in candidates:
-                    try:
-                        r = await client.get(base + "/models", timeout=2)
-                        if r.status_code == 200:
-                            found_base = base
-                            break
-                    except Exception:
-                        continue
-            if not found_base:
-                return
-            from core.database import SessionLocal, ModelEndpoint
-            db = SessionLocal()
-            try:
-                existing = None
-                for base in candidates:
-                    existing = db.query(ModelEndpoint).filter(ModelEndpoint.base_url == base).first()
-                    if existing:
-                        break
-                if not existing:
-                    host = found_base.replace("http://", "").replace("https://", "").split("/")[0]
-                    ep = ModelEndpoint(
-                        id=str(uuid.uuid4())[:8],
-                        name="Ollama" if host.startswith("localhost") else f"Ollama ({host})",
-                        base_url=found_base,
-                        is_enabled=True,
-                    )
-                    db.add(ep)
-                    db.commit()
-                    logger.info(f"Auto-added Ollama endpoint ({found_base})")
-            finally:
-                db.close()
-        except Exception as e:
-            logger.debug(f"Ollama auto-detect: {e}")
-    _startup_tasks.append(asyncio.create_task(_detect_ollama()))
     logger.info("Application startup complete")
 
-@app.on_event("shutdown")
-async def shutdown_event():
+async def _shutdown_event():
     logger.info("Application shutting down...")
     if upload_cleanup_task:
         upload_cleanup_task.cancel()

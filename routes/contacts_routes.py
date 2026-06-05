@@ -29,7 +29,7 @@ LOCAL_CONTACTS_FILE = DATA_DIR / "contacts.json"
 
 def _load_settings():
     if SETTINGS_FILE.exists():
-        return json.loads(SETTINGS_FILE.read_text())
+        return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
     return {}
 
 
@@ -79,7 +79,7 @@ def _load_local_contacts() -> List[Dict]:
     try:
         if not LOCAL_CONTACTS_FILE.exists():
             return []
-        data = json.loads(LOCAL_CONTACTS_FILE.read_text())
+        data = json.loads(LOCAL_CONTACTS_FILE.read_text(encoding="utf-8"))
         rows = data.get("contacts", data) if isinstance(data, dict) else data
         return [_normalize_contact(c) for c in (rows or []) if isinstance(c, dict)]
     except Exception as e:
@@ -130,21 +130,28 @@ def _parse_vcards(text: str) -> List[Dict]:
         contact = {"name": "", "emails": [], "phones": [], "uid": ""}
         for line in block.split("\n"):
             line = line.strip()
-            if line.startswith("FN:") or line.startswith("FN;"):
-                contact["name"] = _vunesc(line.split(":", 1)[1]) if ":" in line else ""
-            elif line.startswith("EMAIL"):
+            # Strip an optional RFC 6350 group prefix (e.g. "item1.EMAIL;...")
+            # that Apple Contacts / iCloud / many CardDAV servers emit by
+            # default — without this the property-name checks below miss those
+            # lines and silently drop the email / phone. The group token only
+            # precedes the property name, so it is safe to strip for matching
+            # and value extraction, and a no-op for non-grouped lines.
+            name_part = re.sub(r"^[A-Za-z0-9-]+\.", "", line, count=1)
+            if name_part.startswith("FN:") or name_part.startswith("FN;"):
+                contact["name"] = _vunesc(name_part.split(":", 1)[1]) if ":" in name_part else ""
+            elif name_part.startswith("EMAIL"):
                 # Handle EMAIL:foo@bar OR EMAIL;TYPE=...:foo@bar OR EMAIL;PREF=1:foo@bar
-                if ":" in line:
-                    email_addr = _vunesc(line.split(":", 1)[1])
+                if ":" in name_part:
+                    email_addr = _vunesc(name_part.split(":", 1)[1])
                     if email_addr and email_addr not in contact["emails"]:
                         contact["emails"].append(email_addr)
-            elif line.startswith("TEL"):
-                if ":" in line:
-                    phone = _vunesc(line.split(":", 1)[1])
+            elif name_part.startswith("TEL"):
+                if ":" in name_part:
+                    phone = _vunesc(name_part.split(":", 1)[1])
                     if phone and phone not in contact["phones"]:
                         contact["phones"].append(phone)
-            elif line.startswith("UID:"):
-                contact["uid"] = _vunesc(line[4:])
+            elif name_part.startswith("UID:"):
+                contact["uid"] = _vunesc(name_part[4:])
         if contact["name"] or contact["emails"]:
             contacts.append(contact)
     return contacts
@@ -676,8 +683,8 @@ def setup_contacts_routes():
     @router.post("/add")
     async def add_contact(data: dict, _admin: str = Depends(require_admin)):
         """Add a new contact."""
-        name = data.get("name", "").strip()
-        email = data.get("email", "").strip()
+        name = (data.get("name") or "").strip()
+        email = (data.get("email") or "").strip()
         if not email:
             return {"success": False, "error": "Email required"}
         # Check if already exists

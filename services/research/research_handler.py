@@ -14,6 +14,8 @@ import time
 from pathlib import Path
 from typing import Optional, Dict
 
+from src.research_utils import is_low_quality
+
 logger = logging.getLogger(__name__)
 
 RESEARCH_DATA_DIR = Path("data/deep_research")
@@ -114,7 +116,7 @@ class ResearchHandler:
         path = RESEARCH_DATA_DIR / f"{session_id}.json"
         if path.exists():
             try:
-                data = json.loads(path.read_text())
+                data = json.loads(path.read_text(encoding="utf-8"))
                 return {
                     "status": data.get("status", "done"),
                     "progress": {},
@@ -151,7 +153,7 @@ class ResearchHandler:
         path = RESEARCH_DATA_DIR / f"{session_id}.json"
         if path.exists():
             try:
-                data = json.loads(path.read_text())
+                data = json.loads(path.read_text(encoding="utf-8"))
                 return data.get("result")
             except Exception:
                 pass
@@ -171,7 +173,7 @@ class ResearchHandler:
         path = RESEARCH_DATA_DIR / f"{session_id}.json"
         if path.exists():
             try:
-                data = json.loads(path.read_text())
+                data = json.loads(path.read_text(encoding="utf-8"))
                 return data.get("sources")
             except Exception:
                 pass
@@ -179,13 +181,14 @@ class ResearchHandler:
 
     @staticmethod
     def _extract_sources(findings: list) -> list:
-        """Extract deduplicated [{url, title}] from findings."""
+        """Extract deduplicated [{url, title}] from findings, filtering low-quality ones."""
         seen = set()
         sources = []
         for f in findings:
             url = f.get("url", "")
             title = f.get("title", "") or url
-            if url and url not in seen:
+            summary = f.get("summary", "") or f.get("evidence", "")
+            if url and url not in seen and not is_low_quality(summary):
                 seen.add(url)
                 sources.append({"url": url, "title": title})
         return sources
@@ -219,7 +222,7 @@ class ResearchHandler:
                 "started_at": entry["started_at"],
                 "completed_at": time.time(),
             }
-            path.write_text(json.dumps(data))
+            path.write_text(json.dumps(data), encoding="utf-8")
             logger.info(f"Research result saved to {path}")
         except Exception as e:
             logger.error(f"Failed to save research result: {e}")
@@ -346,7 +349,8 @@ class ResearchHandler:
             for f in findings:
                 url = f.get("url", "")
                 title = f.get("title", "") or url
-                if url and url not in seen_urls:
+                summary = f.get("summary", "") or f.get("evidence", "")
+                if url and url not in seen_urls and not is_low_quality(summary):
                     seen_urls.add(url)
                     source_lines.append(f"- [{title}]({url})")
             if source_lines:

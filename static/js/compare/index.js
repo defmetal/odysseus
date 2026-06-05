@@ -92,7 +92,9 @@ async function toggleMode() {
     deactivate(true);
     return false;
   }
+  if (state._openingSelector) return false;
 
+  state._openingSelector = true;
   try {
     const confirmed = await showModelSelector();
     if (!confirmed) return false;
@@ -104,6 +106,8 @@ async function toggleMode() {
   } catch (err) {
     console.error('Compare toggleMode error:', err);
     return false;
+  } finally {
+    state._openingSelector = false;
   }
 }
 
@@ -206,7 +210,9 @@ async function _buildCompareUI() {
     for (let i = 0; i < n; i++) {
       const m = state._selectedModels[i];
       const fd = new FormData();
-      fd.append('name', '[CMP] ' + modelShorts[i]);
+      // Blind mode: name the session by its neutral slot so the sidebar /
+      // GET /api/sessions can't de-anonymize the comparison (issue #1285).
+      fd.append('name', '[CMP] ' + (state._blindMode ? 'Model ' + _slotChar(i) : modelShorts[i]));
       fd.append('endpoint_url', m.endpoint || '');
       fd.append('model', m.model || '');
       if (m.endpointId) {
