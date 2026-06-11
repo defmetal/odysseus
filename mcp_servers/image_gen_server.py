@@ -41,6 +41,40 @@ async def list_tools() -> list[Tool]:
     ]
 
 
+def _first_local_image_model():
+    """First model id served by a reachable image-type endpoint, or None.
+    Mirrors the fallback in src.ai_interaction.do_generate_image so the
+    agent tool path resolves local diffusion servers the same way."""
+    try:
+        import httpx
+        from src.database import SessionLocal, ModelEndpoint
+        db = SessionLocal()
+        try:
+            eps = db.query(ModelEndpoint).filter(
+                ModelEndpoint.is_enabled == True,  # noqa: E712
+                ModelEndpoint.model_type == "image",
+            ).all()
+            for ep in eps:
+                base = (ep.base_url or "").rstrip("/")
+                if not base:
+                    continue
+                if not base.endswith("/v1"):
+                    base += "/v1"
+                try:
+                    r = httpx.get(base + "/models", timeout=3)
+                    r.raise_for_status()
+                    mids = [m.get("id") for m in (r.json().get("data") or []) if m.get("id")]
+                    if mids:
+                        return mids[0]
+                except Exception:
+                    continue
+        finally:
+            db.close()
+    except Exception:
+        pass
+    return None
+
+
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     if name != "generate_image":
@@ -78,10 +112,21 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     break
                 except ValueError:
                     continue
+            # Fall back to any locally registered image-type endpoint
+            if not model_spec:
+                model_spec = _first_local_image_model()
             if not model_spec:
                 return [TextContent(type="text", text="Error: No image model found. Configure one in Admin.")]
 
-        url, model_id, headers = _resolve_model(model_spec)
+        try:
+            url, model_id, headers = _resolve_model(model_spec)
+        except ValueError:
+            # Agent models sometimes pass invented names (or a size string)
+            # as the model — recover via the first local image endpoint.
+            _fb = _first_local_image_model()
+            if not _fb:
+                return [TextContent(type="text", text=f"Error: No endpoint found with image model '{model_spec}'.")]
+            url, model_id, headers = _resolve_model(_fb)
 
         is_gpt_image = "gpt-image" in model_id.lower()
         base_url = url.replace("/chat/completions", "").replace("/v1/messages", "").rstrip("/")
@@ -91,8 +136,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         valid_dalle3_sizes = {"1024x1024", "1024x1792", "1792x1024"}
         if is_gpt_image and size not in valid_gpt_sizes:
             size = "1024x1024"
-        elif not is_gpt_image and size not in valid_dalle3_sizes:
+        elif "dall-e" in model_id.lower() and size not in valid_dalle3_sizes:
             size = "1024x1024"
+        # Local diffusion endpoints accept arbitrary WxH — leave size as given.
 
         payload = {"model": model_id, "prompt": prompt, "n": 1, "size": size}
         if is_gpt_image:

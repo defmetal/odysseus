@@ -1589,6 +1589,15 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
     size = lines[2].strip() if len(lines) > 2 and lines[2].strip() else "1024x1024"
     quality = lines[3].strip() if len(lines) > 3 and lines[3].strip() else "medium"
 
+    # Image-generation sessions have no UI size control, so allow an inline
+    # trailing size token in the prompt itself (e.g. "... rainy alley 1344x768").
+    if size == "1024x1024":
+        import re as _re
+        _m = _re.search(r"[,;\s]+(\d{3,4})\s*[xX]\s*(\d{3,4})\s*$", prompt)
+        if _m:
+            size = f"{_m.group(1)}x{_m.group(2)}"
+            prompt = prompt[:_m.start()].rstrip(" ,;")
+
     if not prompt:
         return {"error": "Image prompt is required (line 1)"}
 
@@ -1653,8 +1662,47 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
     try:
         url, model_id, headers = _resolve_model(model_spec, owner=owner)
     except ValueError:
-        return {"error": f"No endpoint found with image model '{model_spec}'. "
-                "Configure an OpenAI-compatible endpoint with image generation support."}
+        # Agent models sometimes invent model names (e.g. "MidJourney").
+        # Fall back to the first reachable image-type endpoint's model
+        # instead of failing the whole call.
+        fallback_model = None
+        try:
+            from src.database import SessionLocal, ModelEndpoint
+            from src.auth_helpers import owner_filter
+            import httpx as _req
+            _fdb = SessionLocal()
+            try:
+                _fq = _fdb.query(ModelEndpoint).filter(
+                    ModelEndpoint.is_enabled == True,
+                    ModelEndpoint.model_type == "image",
+                )
+                if owner:
+                    _fq = owner_filter(_fq, ModelEndpoint, owner)
+                for _fep in _fq.all():
+                    _fbase = _fep.base_url.rstrip("/")
+                    if not _fbase.endswith("/v1"):
+                        _fbase += "/v1"
+                    try:
+                        _fr = _req.get(_fbase + "/models", timeout=3)
+                        _fr.raise_for_status()
+                        _fids = [m.get("id") for m in (_fr.json().get("data") or []) if m.get("id")]
+                        if _fids:
+                            fallback_model = _fids[0]
+                            break
+                    except Exception:
+                        continue
+            finally:
+                _fdb.close()
+        except Exception:
+            pass
+        if fallback_model:
+            try:
+                url, model_id, headers = _resolve_model(fallback_model, owner=owner)
+            except ValueError:
+                fallback_model = None
+        if not fallback_model:
+            return {"error": f"No endpoint found with image model '{model_spec}'. "
+                    "Configure an OpenAI-compatible endpoint with image generation support."}
 
     # Detect if this is a GPT image model vs DALL-E vs local diffusion
     is_gpt_image = "gpt-image" in model_id.lower()

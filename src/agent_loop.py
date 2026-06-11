@@ -213,6 +213,10 @@ When referencing app entities by id, use clickable markdown anchors:
 """
 
 _DOMAIN_RULES = {
+    "images": """\
+## Image rules
+- For image generation requests, use `generate_image` with the user's description as the prompt; pass an explicit size only when the user gives one.
+- For edits to an existing image, use `edit_image`.""",
     "web": """\
 ## Web rules
 - For web lookup/search/latest/current requests, use `web_search` or `web_fetch`.
@@ -265,6 +269,7 @@ _DOMAIN_RULES = {
 }
 
 _DOMAIN_TOOL_MAP = {
+    "images": {"generate_image", "edit_image"},
     "web": {"web_search", "web_fetch", "trigger_research", "manage_research"},
     "documents": {"create_document", "edit_document", "update_document", "suggest_document", "manage_documents"},
     "email": {"list_email_accounts", "list_emails", "read_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact"},
@@ -390,7 +395,7 @@ Suggest changes with explanations (for review/feedback requests).""",
 <size>
 <quality>
 ```
-Generate an image. Line 1 = description, line 2 = model name, line 3 = WxH (e.g. 1024x1024), line 4 = quality.""",
+Generate an image. Line 1 = description, line 2 = model name (LEAVE EMPTY to use the configured image model — never guess or invent model names), line 3 = WxH (e.g. 1024x1024), line 4 = quality.""",
 
     "chat_with_model": "- ```chat_with_model``` — Ask a DIFFERENT AI model and relay its answer. Line 1 = model name (or 'model@endpoint'), rest = your message. Use when the user says 'ask <model>', 'what does <model> think', or wants to compare/their answer from another model.",
     "ask_teacher": "- ```ask_teacher``` — Escalate a hard question to a more capable model. Line 1 = model name or 'auto', rest = the question. Use when stuck or need expert knowledge.",
@@ -765,6 +770,8 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     def has(*patterns: str) -> bool:
         return any(re.search(p, q) for p in patterns)
 
+    if has(r"\b(images?|picture|photo|illustration|drawing|draw|sketch|render|artwork|wallpaper|inpaint|img2img|text-to-image|generate.{0,20}(?:image|picture|art)|make.{0,20}(?:image|picture))\b"):
+        domains.add("images")
     if has(r"\b(cookbook|serve|serving|served|launch|start|preset|vllm|sglang|llama\.?cpp|ollama|download|downloading|pull|cached models?|running models?|model servers?|models? (?:are )?running|what models?|model picker|gpu box|kierkegaard|odysseus|ajax|qwen|gemma|llama|mistral|minimax)\b"):
         domains.add("cookbook")
     if has(r"\b(emails?|mails?|gmail|inbox|reply|forward|cc|bcc|send email|compose email|draft email|message chris|message him|message her)\b"):
@@ -788,6 +795,8 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     if has(r"\b(session|chat history|rename chat|delete chat|archive chat|fork chat|list chats)\b"):
         domains.add("sessions")
     if has(r"\b(file|folder|directory|repo|git|grep|find in files|read file|edit file|shell|terminal|bash|python)\b"):
+        domains.add("files")
+    if has(r"\b(caption(?:ing|s|ed)?|datasets?|dedupe|de-dup\w*|lora|checkpoints?|training|fine-?tun\w*)\b"):
         domains.add("files")
     if has(r"\b(endpoint|api token|mcp|webhook|preference|configure|config|setting)\b"):
         domains.add("settings")

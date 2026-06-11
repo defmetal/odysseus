@@ -461,6 +461,38 @@ def load_model():
         except Exception as e:
             logger.debug(f"Could not set adapter weights: {e}")
 
+    # Optional FP8 weight-only quantization (after LoRA so adapters can be
+    # fused into the weights first — PEFT injection onto already-quantized
+    # linears is unreliable). Roughly halves VRAM at minor quality cost.
+    if getattr(_args, "quantize_fp8", False):
+        try:
+            if _args.lora:
+                _pipe.fuse_lora()
+                _pipe.unload_lora_weights()
+                logger.info("Fused LoRA into base weights before quantization")
+            try:
+                from torchao.quantization import quantize_, Float8WeightOnlyConfig
+                _qcfg = Float8WeightOnlyConfig()
+            except ImportError:
+                from torchao.quantization import quantize_, float8_weight_only
+                _qcfg = float8_weight_only()
+            quantize_(_pipe.transformer, _qcfg)
+            if hasattr(_pipe, "text_encoder") and _pipe.text_encoder is not None:
+                quantize_(_pipe.text_encoder, _qcfg)
+            #
+            # Quantized modules misreport ModelMixin.dtype, and the inpaint
+            # pipeline relies on self.transformer.dtype to downcast its fp32
+            # latents before each forward pass. Pin the reported dtype.
+            _dt = DTYPE_MAP.get(_args.dtype, torch.bfloat16)
+            _cls = _pipe.transformer.__class__
+            _pipe.transformer.__class__ = type(
+                _cls.__name__ + "FP8", (_cls,), {"dtype": property(lambda self, _d=_dt: _d)}
+            )
+            torch.cuda.empty_cache()
+            logger.info("Quantized transformer + text encoder to FP8 (weight-only)")
+        except Exception as e:
+            logger.warning(f"FP8 quantization failed (serving unquantized): {e}")
+
 
 @app.get("/v1/models")
 def list_models():
@@ -512,7 +544,7 @@ def generate_image(req: ImageRequest):
                 width=width,
                 height=height,
                 num_inference_steps=steps,
-                guidance_scale=3.5,
+                guidance_scale=_args.guidance,
             )
         else:
             result = _pipe(
@@ -520,7 +552,7 @@ def generate_image(req: ImageRequest):
                 width=width,
                 height=height,
                 num_inference_steps=steps,
-                guidance_scale=3.5,
+                guidance_scale=_args.guidance,
             )
         img = result.images[0]
 
@@ -708,7 +740,7 @@ def inpaint_image(req: InpaintRequest):
                 height=work_h,
                 num_inference_steps=steps,
                 strength=strength,
-                guidance_scale=7.5,
+                guidance_scale=_args.guidance if _args.guidance != 3.5 else 7.5,
             )
         elif alt_type == 'img2img' and alt_pipe:
             raise TypeError("Skip to img2img fallback")
@@ -722,7 +754,7 @@ def inpaint_image(req: InpaintRequest):
                 height=work_h,
                 num_inference_steps=steps,
                 strength=strength,
-                guidance_scale=7.5,
+                guidance_scale=_args.guidance if _args.guidance != 3.5 else 7.5,
             )
     except TypeError:
         # Pipeline doesn't support native inpainting — use crop-to-mask + img2img + composite
@@ -808,7 +840,7 @@ def inpaint_image(req: InpaintRequest):
                 width=cw,
                 height=ch,
                 num_inference_steps=steps,
-                guidance_scale=3.5,
+                guidance_scale=_args.guidance,
             )
             generated_crop = result.images[0].resize((cw, ch))
 
@@ -1140,6 +1172,8 @@ if __name__ == "__main__":
     parser.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16", "float32"])
     parser.add_argument("--device-map", default=None, help="Device map strategy (unused, kept for compat)")
     parser.add_argument("--steps", type=int, default=0, help="Default inference steps (0=auto)")
+    parser.add_argument("--guidance", type=float, default=3.5, help="Guidance scale (CFG). Use 1.0 for guidance-distilled models like Z-Image-Turbo.")
+    parser.add_argument("--quantize-fp8", action="store_true", help="FP8 weight-only quantization of transformer + text encoder (fuses any LoRA first). Requires torchao.")
     parser.add_argument("--width", type=int, default=1024, help="Default output width")
     parser.add_argument("--height", type=int, default=1024, help="Default output height")
     parser.add_argument("--cpu-offload", action="store_true", help="Enable model CPU offload")
