@@ -45,6 +45,35 @@ _model_id = ""
 DTYPE_MAP = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
 _args = None
 
+# Optional style auto-trigger: maps natural-language prompts to a trained LoRA
+# trigger so callers never type the exact trigger. Loaded from --style-config.
+_apply_style = None
+
+
+def _load_style_config(path: str):
+    """Load apply_trigger() from a styles.py next to the given styles.json."""
+    global _apply_style
+    if not path:
+        return
+    try:
+        from pathlib import Path as _P
+        d = str(_P(path).resolve().parent)
+        if d not in sys.path:
+            sys.path.insert(0, d)
+        from styles import apply_trigger
+        _apply_style = apply_trigger
+        logger.info(f"Style auto-trigger enabled from {path}")
+    except Exception as e:
+        logger.warning(f"Could not load style config {path}: {e}")
+
+
+def _styled(prompt: str) -> str:
+    """Apply the style trigger if configured; otherwise return prompt unchanged."""
+    try:
+        return _apply_style(prompt) if _apply_style else prompt
+    except Exception:
+        return prompt
+
 
 @asynccontextmanager
 async def lifespan(application):
@@ -119,6 +148,10 @@ class ImageRequest(BaseModel):
     size: str = "1024x1024"
     quality: str = "medium"
     response_format: str = "b64_json"
+    # img2img: when `image` (base64) is present, generations runs img2img
+    # instead of txt2img. This is what Odysseus's gallery style-transfer posts.
+    image: str = ""
+    strength: float = 0.6
 
 
 def _fix_meta_tensors(pipe, dtype):
@@ -512,6 +545,15 @@ def generate_image(req: ImageRequest):
     if _pipe is None:
         return {"error": "Model not loaded"}
 
+    req.prompt = _styled(req.prompt)
+    # img2img branch: an input image turns this into a restyle/transform.
+    # Odysseus's gallery style-transfer posts {prompt, image, strength} here.
+    if req.image:
+        return img2img_edit(Img2ImgRequest(
+            image=req.image, prompt=req.prompt, strength=req.strength,
+            steps=(0 if req.quality != "high" else 20), size=req.size,
+        ))
+
     # Parse size
     try:
         w, h = req.size.split("x")
@@ -629,6 +671,21 @@ def _get_inpaint_pipe():
                 return _inpaint_pipe, 'inpaint'
             except Exception as e:
                 logger.debug(f"{name} from_pipe failed: {e}")
+                # from_pipe drops the transformer when its class was swapped
+                # for the FP8 dtype-pin subclass — build directly from the
+                # shared components (same fix as img2img).
+                try:
+                    _inpaint_pipe = cls(
+                        transformer=_pipe.transformer,
+                        vae=_pipe.vae,
+                        text_encoder=_pipe.text_encoder,
+                        tokenizer=_pipe.tokenizer,
+                        scheduler=_pipe.scheduler,
+                    )
+                    logger.info(f"Loaded inpaint pipeline (direct): {name}")
+                    return _inpaint_pipe, 'inpaint'
+                except Exception as e2:
+                    logger.debug(f"{name} direct construct failed: {e2}")
 
     # Try img2img pipeline
     img2img_names = [
@@ -670,11 +727,110 @@ def _get_inpaint_pipe():
     return None, None
 
 
+class Img2ImgRequest(BaseModel):
+    image: str          # base64 PNG/JPEG (data: URL prefix tolerated)
+    prompt: str
+    strength: float = 0.6   # 0 = keep input unchanged, 1 = ignore input
+    steps: int = 0          # 0 = auto (20)
+    size: str = ""          # "WxH"; empty = keep input aspect, cap long side 1344
+    guidance: float = 0.0   # 0 = use server --guidance default
+
+
+def _ensure_img2img_pipe():
+    """Load the Img2Img sibling of the running pipeline, sharing its
+    (quantized, LoRA-fused) components via from_pipe. Cached globally."""
+    global _img2img_pipe
+    if _img2img_pipe:
+        return _img2img_pipe
+    import diffusers
+    cls_name = type(_pipe).__name__.replace("Pipeline", "Img2ImgPipeline")
+    cls = getattr(diffusers, cls_name, None)
+    if cls is None:
+        return None
+    try:
+        _img2img_pipe = cls.from_pipe(_pipe)
+    except Exception as e1:
+        # from_pipe drops the transformer when its class was swapped for the
+        # dtype-pinned FP8 subclass — construct directly from shared components.
+        try:
+            _img2img_pipe = cls(
+                transformer=_pipe.transformer,
+                vae=_pipe.vae,
+                text_encoder=_pipe.text_encoder,
+                tokenizer=_pipe.tokenizer,
+                scheduler=_pipe.scheduler,
+            )
+        except Exception as e2:
+            logger.warning(f"Could not load {cls_name}: from_pipe={e1}; direct={e2}")
+            return None
+    logger.info(f"Loaded img2img pipeline: {cls_name} (shared components)")
+    return _img2img_pipe
+
+
+@app.post("/v1/images/edits")
+def img2img_edit(req: Img2ImgRequest):
+    """Restyle / transform an input image (img2img). Reference in → styled out,
+    composition broadly preserved; `strength` controls how far it moves."""
+    req.prompt = _styled(req.prompt)
+    from PIL import Image as _PILImg
+    import base64 as _b64
+
+    pipe = _ensure_img2img_pipe()
+    if pipe is None:
+        return {"error": "img2img pipeline unavailable for this model"}
+
+    raw = req.image.split(",", 1)[1] if req.image.startswith("data:") else req.image
+    try:
+        init = _PILImg.open(io.BytesIO(_b64.b64decode(raw))).convert("RGB")
+    except Exception as e:
+        return {"error": f"could not decode input image: {e}"}
+
+    # Working size: explicit WxH, else keep aspect with long side capped to 1344,
+    # rounded to multiples of 8 (latent grid requirement).
+    if req.size and "x" in req.size.lower():
+        w, h = (int(v) for v in req.size.lower().split("x")[:2])
+    else:
+        w, h = init.size
+        cap = 1344
+        if max(w, h) > cap:
+            scale = cap / max(w, h)
+            w, h = int(w * scale), int(h * scale)
+    w = max(64, (w // 8) * 8)
+    h = max(64, (h // 8) * 8)
+    init = init.resize((w, h), _PILImg.LANCZOS)
+
+    steps = req.steps or _args.steps or 20
+    guidance = req.guidance or _args.guidance
+    strength = min(max(req.strength, 0.05), 1.0)
+    logger.info(f"img2img: {req.prompt[:70]}... ({w}x{h}, strength={strength}, {steps} steps)")
+
+    try:
+        result = pipe(
+            prompt=req.prompt,
+            image=init,
+            strength=strength,
+            width=w,
+            height=h,
+            num_inference_steps=steps,
+            guidance_scale=guidance,
+        )
+        img = result.images[0]
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode()
+        return {"created": 0, "data": [{"b64_json": b64}]}
+    except Exception as e:
+        logger.exception("img2img failed")
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=f"img2img failed: {e}")
+
+
 @app.post("/v1/images/inpaint")
 def inpaint_image(req: InpaintRequest):
     """Inpaint masked region. Tries: native inpaint → img2img+composite → txt2img+composite."""
     if _pipe is None:
         return {"error": "Model not loaded"}
+    req.prompt = _styled(req.prompt)
 
     from PIL import Image as PILImage
 
@@ -1173,6 +1329,7 @@ if __name__ == "__main__":
     parser.add_argument("--device-map", default=None, help="Device map strategy (unused, kept for compat)")
     parser.add_argument("--steps", type=int, default=0, help="Default inference steps (0=auto)")
     parser.add_argument("--guidance", type=float, default=3.5, help="Guidance scale (CFG). Use 1.0 for guidance-distilled models like Z-Image-Turbo.")
+    parser.add_argument("--style-config", default="", help="Path to a styles.json (with styles.py beside it) to auto-apply a LoRA trigger to incoming prompts.")
     parser.add_argument("--quantize-fp8", action="store_true", help="FP8 weight-only quantization of transformer + text encoder (fuses any LoRA first). Requires torchao.")
     parser.add_argument("--width", type=int, default=1024, help="Default output width")
     parser.add_argument("--height", type=int, default=1024, help="Default output height")
@@ -1188,6 +1345,8 @@ if __name__ == "__main__":
              "no cross-origin access — only pass this if you need a browser "
              "on a specific origin to call the server.")
     _args = parser.parse_args()
+
+    _load_style_config(_args.style_config)
 
     # Replace the module-load middleware stack with the CLI-configured one so
     # operator-supplied --allowed-host / --allowed-origin values take effect

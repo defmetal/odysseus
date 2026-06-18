@@ -216,7 +216,8 @@ _DOMAIN_RULES = {
     "images": """\
 ## Image rules
 - For image generation requests, use `generate_image` with the user's description as the prompt; pass an explicit size only when the user gives one.
-- For edits to an existing image, use `edit_image`.""",
+- To restyle an UPLOADED image into the trained style, use `restyle_image` (one prompt line). To fix ONE part of an uploaded image, use `inpaint_region` (region line + prompt line). These tools find the uploaded image, the file path, and the database themselves — NEVER run shell commands, search for files, or touch any database to do image editing; just call the tool once and report its result.
+- For gallery-image edits (upscale, remove background), use `edit_image`.""",
     "web": """\
 ## Web rules
 - For web lookup/search/latest/current requests, use `web_search` or `web_fetch`.
@@ -269,7 +270,7 @@ _DOMAIN_RULES = {
 }
 
 _DOMAIN_TOOL_MAP = {
-    "images": {"generate_image", "edit_image"},
+    "images": {"generate_image", "edit_image", "restyle_image", "inpaint_region"},
     "web": {"web_search", "web_fetch", "trigger_research", "manage_research"},
     "documents": {"create_document", "edit_document", "update_document", "suggest_document", "manage_documents"},
     "email": {"list_email_accounts", "list_emails", "read_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact"},
@@ -396,6 +397,19 @@ Suggest changes with explanations (for review/feedback requests).""",
 <quality>
 ```
 Generate an image. Line 1 = description, line 2 = model name (LEAVE EMPTY to use the configured image model — never guess or invent model names), line 3 = WxH (e.g. 1024x1024), line 4 = quality.""",
+
+    "restyle_image": """\
+```restyle_image
+<prompt>
+```
+Restyle the user's most recently UPLOADED image into the trained style (img2img). Use when they attach an image and say "restyle this", "make this in my style", "redraw this in 90s anime / sailor moon / cutie honey style". Line 1 = describe the image in plain words. Do NOT add a style trigger — it's applied automatically. If the user names a style ("90s anime", "cutie honey", "sailor moon look"), include their wording; otherwise the house style is used. The tool finds the uploaded image itself — do NOT look for files, paths, or run shell commands. Result lands in the Gallery.""",
+
+    "inpaint_region": """\
+```inpaint_region
+<region>
+<prompt>
+```
+Fix ONE part of the user's most recently UPLOADED image (inpaint). Use when they attach an image and say "fix her left hand", "redraw the face", "change the sign". Line 1 = the region to fix in plain words (e.g. "the left hand"). Line 2 = describe what to draw there in plain words — do NOT add a style trigger, it's automatic. The tool finds the image and locates the region itself — do NOT look for files, paths, masks, or run shell commands. Result lands in the Gallery.""",
 
     "chat_with_model": "- ```chat_with_model``` — Ask a DIFFERENT AI model and relay its answer. Line 1 = model name (or 'model@endpoint'), rest = your message. Use when the user says 'ask <model>', 'what does <model> think', or wants to compare/their answer from another model.",
     "ask_teacher": "- ```ask_teacher``` — Escalate a hard question to a more capable model. Line 1 = model name or 'auto', rest = the question. Use when stuck or need expert knowledge.",
@@ -771,6 +785,20 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         return any(re.search(p, q) for p in patterns)
 
     if has(r"\b(images?|picture|photo|illustration|drawing|draw|sketch|render|artwork|wallpaper|inpaint|img2img|text-to-image|generate.{0,20}(?:image|picture|art)|make.{0,20}(?:image|picture))\b"):
+        domains.add("images")
+    # Image EDITING (restyle/inpaint) is handled by the restyle_image /
+    # inpaint_region TOOLS in the images domain — route here, and deliberately
+    # do NOT grant shell, so a weak model can't improvise file/db commands.
+    _img_edit_verb = has(
+        r"\b(restyle|inpaint|img2img|redraw|re-?draw|retouch|touch[- ]?up)\b",
+        r"\bfix\b.{0,40}\b(hand|hands|face|eyes?|fingers?|mouth|hair|arms?|legs?|background|expression)\b",
+        r"\b(in (?:my|the toei|toei|the 90s)|my) style\b",
+        r"\bedit (?:this|the|my) (?:image|picture|photo|frame|drawing|illustration|art)\b",
+    )
+    # When an image is attached, treat a bare edit verb (fix/redraw/change/edit)
+    # as an image-edit request too — the attachment is the object being edited.
+    _has_attachment = "[image attached" in q
+    if _img_edit_verb or (_has_attachment and has(r"\b(fix|redraw|re-?draw|change|edit|restyle|clean up|touch up)\b")):
         domains.add("images")
     if has(r"\b(cookbook|serve|serving|served|launch|start|preset|vllm|sglang|llama\.?cpp|ollama|download|downloading|pull|cached models?|running models?|model servers?|models? (?:are )?running|what models?|model picker|gpu box|kierkegaard|odysseus|ajax|qwen|gemma|llama|mistral|minimax)\b"):
         domains.add("cookbook")
