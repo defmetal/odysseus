@@ -22,9 +22,12 @@ sys.modules["xformers.ops.fmha"] = type(sys)("xformers.ops.fmha")
 
 import argparse
 import base64
+import functools
+import gc
 import io
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 
@@ -48,6 +51,14 @@ _args = None
 # Optional style auto-trigger: maps natural-language prompts to a trained LoRA
 # trigger so callers never type the exact trigger. Loaded from --style-config.
 _apply_style = None
+
+# Idle-unload: release GPU VRAM after a stretch with no image requests so another
+# GPU process (e.g. an Ollama LLM) can use the card; the model auto-reloads on the
+# next request. _load_lock guards all _pipe / _active state transitions.
+_load_lock = threading.RLock()
+_last_activity = time.time()
+_active = 0
+_idle_unload_seconds = 0  # 0 disables idle-unload; set from --idle-unload-seconds
 
 
 def _load_style_config(path: str):
@@ -78,6 +89,9 @@ def _styled(prompt: str) -> str:
 @asynccontextmanager
 async def lifespan(application):
     load_model()
+    if _idle_unload_seconds > 0:
+        threading.Thread(target=_idle_monitor, daemon=True, name="idle-monitor").start()
+        logger.info(f"Idle-unload enabled: release VRAM after {_idle_unload_seconds}s idle")
     yield
 
 
@@ -527,6 +541,72 @@ def load_model():
             logger.warning(f"FP8 quantization failed (serving unquantized): {e}")
 
 
+def _touch():
+    global _last_activity
+    _last_activity = time.time()
+
+
+def _unload_model():
+    """Drop the pipeline(s) and return VRAM to the driver so another GPU process
+    (e.g. an Ollama LLM) can use it. Caller must hold _load_lock. The model
+    reloads automatically on the next request. The process stays alive holding
+    only the small CUDA context (~0.5GB), so ~all of the model VRAM is freed."""
+    global _pipe, _inpaint_pipe, _img2img_pipe
+    if _pipe is None:
+        return
+    logger.info("Idle-unload: releasing GPU VRAM (reloads on next request)")
+    _pipe = None
+    _inpaint_pipe = None
+    _img2img_pipe = None
+    gc.collect()
+    try:
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        torch.cuda.ipc_collect()
+    except Exception as e:
+        logger.debug(f"empty_cache after unload failed: {e}")
+    logger.info("Idle-unload: VRAM released")
+
+
+def _idle_monitor():
+    """Daemon watchdog: when enabled and the server has been idle (no in-flight
+    requests, no activity for the timeout), free the GPU."""
+    while True:
+        time.sleep(15)
+        if _idle_unload_seconds <= 0:
+            continue
+        with _load_lock:
+            if _pipe is None or _active > 0:
+                continue
+            idle_for = time.time() - _last_activity
+            if idle_for < _idle_unload_seconds:
+                continue
+            logger.info(f"Idle for {idle_for:.0f}s >= {_idle_unload_seconds}s threshold")
+            _unload_model()
+
+
+def _with_model(fn):
+    """Route wrapper for the GPU endpoints: reload the model if it was
+    idle-unloaded, count the in-flight request so the monitor won't unload
+    mid-generation, and reset the idle clock. functools.wraps preserves the
+    original (typed) signature so FastAPI still parses the request body."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        global _active
+        with _load_lock:
+            if _pipe is None:
+                load_model()
+            _active += 1
+            _touch()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            with _load_lock:
+                _active -= 1
+            _touch()
+    return wrapper
+
+
 @app.get("/v1/models")
 def list_models():
     return {
@@ -541,6 +621,7 @@ def list_models():
 
 
 @app.post("/v1/images/generations")
+@_with_model
 def generate_image(req: ImageRequest):
     if _pipe is None:
         return {"error": "Model not loaded"}
@@ -564,7 +645,9 @@ def generate_image(req: ImageRequest):
     # Map quality to num_inference_steps
     default_steps = _args.steps or 8
     steps_map = {"low": 4, "medium": default_steps, "high": 20, "auto": 12}
-    steps = steps_map.get(req.quality, default_steps)
+    # An explicit --steps forces that count regardless of quality (needed for
+    # undistilled bases like Z-Image that want ~30 steps).
+    steps = _args.steps if _args.steps else steps_map.get(req.quality, default_steps)
 
     logger.info(f"Generating: {req.prompt[:80]}... ({width}x{height}, {steps} steps)")
     start = time.time()
@@ -768,6 +851,7 @@ def _ensure_img2img_pipe():
 
 
 @app.post("/v1/images/edits")
+@_with_model
 def img2img_edit(req: Img2ImgRequest):
     """Restyle / transform an input image (img2img). Reference in → styled out,
     composition broadly preserved; `strength` controls how far it moves."""
@@ -826,6 +910,7 @@ def img2img_edit(req: Img2ImgRequest):
 
 
 @app.post("/v1/images/inpaint")
+@_with_model
 def inpaint_image(req: InpaintRequest):
     """Inpaint masked region. Tries: native inpaint → img2img+composite → txt2img+composite."""
     if _pipe is None:
@@ -1160,6 +1245,7 @@ def _decode_mask_b64(b64_str, target_size):
 
 
 @app.post("/v1/images/harmonize")
+@_with_model
 def harmonize_image(req: HarmonizeRequest):
     """Two-stage layer harmonization.
 
@@ -1313,6 +1399,36 @@ def _legacy_whole_image_harmonize(req, source_full):
     return {"image": b64, "elapsed": round(elapsed, 2)}
 
 
+@app.post("/admin/unload")
+def admin_unload():
+    """Force-release GPU VRAM now (e.g. right before a big LLM run) instead of
+    waiting for the idle timeout. The model reloads on the next image request."""
+    with _load_lock:
+        was = _pipe is not None
+        _unload_model()
+    return {"unloaded": was, "loaded": _pipe is not None}
+
+
+@app.post("/admin/load")
+def admin_load():
+    """Force-reload (warm up) the model now."""
+    with _load_lock:
+        if _pipe is None:
+            load_model()
+    return {"loaded": _pipe is not None, "model": _model_id}
+
+
+@app.get("/admin/status")
+def admin_status():
+    return {
+        "loaded": _pipe is not None,
+        "model": _model_id,
+        "active_requests": _active,
+        "idle_seconds": round(time.time() - _last_activity, 1),
+        "idle_unload_seconds": _idle_unload_seconds,
+    }
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "model": _model_id}
@@ -1336,6 +1452,10 @@ if __name__ == "__main__":
     parser.add_argument("--cpu-offload", action="store_true", help="Enable model CPU offload")
     parser.add_argument("--attention-slicing", action="store_true", help="Enable attention slicing")
     parser.add_argument("--vae-slicing", action="store_true", help="Enable VAE slicing")
+    parser.add_argument("--idle-unload-seconds", type=int, default=0,
+        help="Release GPU VRAM after this many seconds with no image requests "
+             "(model auto-reloads on the next request). 0 = never (default). "
+             "Frees the GPU for an LLM (e.g. Ollama) when not generating images.")
     parser.add_argument("--harmonize-gpu", type=int, default=None, help="GPU index for harmonize/img2img (default: same as main)")
     parser.add_argument("--allowed-host", action="append", default=[],
         help="Additional Host header value to accept (DNS-rebinding allowlist). "
@@ -1345,6 +1465,7 @@ if __name__ == "__main__":
              "no cross-origin access — only pass this if you need a browser "
              "on a specific origin to call the server.")
     _args = parser.parse_args()
+    _idle_unload_seconds = _args.idle_unload_seconds
 
     _load_style_config(_args.style_config)
 

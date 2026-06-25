@@ -344,11 +344,35 @@ def _parse_qualified_mcp_args(tool: str, content: str) -> tuple[Dict, Optional[s
 
 
 def _parse_generate_image(content: str) -> Dict:
-    lines = content.strip().split("\n")
-    args = {"prompt": lines[0].strip() if lines else ""}
-    for i, key in enumerate(["model", "size", "quality"], 1):
-        if len(lines) > i and lines[i].strip():
-            args[key] = lines[i].strip()
+    # Weak models frequently echo the tool's <prompt>/<model>/<size>/<quality>
+    # template lines verbatim (and sprinkle blank lines). A naive positional
+    # parse then puts "<model>"/"<size>" into those fields as real values and
+    # the call fails. Drop blank lines and any literal <placeholder> token, then
+    # detect size (WxH) and quality (keyword) by pattern rather than position,
+    # so an echoed template degrades to "prompt only" — which uses the
+    # configured image model + default size/quality.
+    import re
+    lines = [ln.strip() for ln in content.strip().split("\n")]
+    lines = [ln for ln in lines if ln and not re.fullmatch(r"<[a-z_]+>", ln, re.I)]
+    if not lines:
+        return {"prompt": ""}
+    args = {"prompt": lines[0]}
+    rest = lines[1:]
+    consumed = set()
+    for j, ln in enumerate(rest):
+        if re.fullmatch(r"\d{2,5}\s*[xX]\s*\d{2,5}", ln):
+            args["size"] = ln.replace(" ", "")
+            consumed.add(j)
+            break
+    for j, ln in enumerate(rest):
+        if j not in consumed and ln.lower() in ("low", "medium", "high", "auto"):
+            args["quality"] = ln.lower()
+            consumed.add(j)
+            break
+    for j, ln in enumerate(rest):
+        if j not in consumed:
+            args["model"] = ln
+            break
     return args
 
 

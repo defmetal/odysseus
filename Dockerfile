@@ -1,4 +1,9 @@
-FROM python:3.14-slim
+# PINNED to 3.12: the studio GPU/torch stack (torch, diffusers, torchao, vLLM)
+# is pip-installed --user into the persisted /app/.local mount built for
+# CPython 3.12 (cp312 wheels). Bumping the base Python minor version (e.g. to
+# 3.14) makes /app/.local/lib/python3.12/site-packages unimportable and breaks
+# image generation. Keep this at 3.12 unless the /app/.local stack is rebuilt.
+FROM python:3.12-slim
 
 # System deps. tmux is required by Cookbook for background downloads/serves.
 # openssh-client is required for Cookbook remote server tests, setup, probes,

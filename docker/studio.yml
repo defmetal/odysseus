@@ -1,0 +1,20 @@
+# Studio overlay — makes the Z-Image image server start automatically with the
+# Odysseus container, instead of being launched by hand after every reboot.
+#
+# Enable by appending this file to COMPOSE_FILE in .env, e.g.:
+#   COMPOSE_FILE=docker-compose.yml;docker/gpu.nvidia.yml;docker/studio.yml
+#
+# It does two things:
+#   1. Mounts the repo's (locally patched, img2img-capable) diffusion_server.py
+#      over the baked copy, so a container recreate doesn't revert it.
+#   2. Overrides the container command to run start-studio.sh, which launches
+#      the :8100 style server in the background and then execs uvicorn.
+#
+# Paths are resolved relative to the project directory (the dir holding
+# docker-compose.yml), so the ./scripts and ./data references work even though
+# this overlay lives under docker/.
+services:
+  odysseus:
+    volumes:
+      - ./scripts/diffusion_server.py:/app/scripts/diffusion_server.py:ro,z
+    command: ["sh", "/app/data/studio/scripts/start-studio.sh"]
