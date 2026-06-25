@@ -853,12 +853,27 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     if has(r"\b(contact|contacts|phone|phone number|address book|vcard)\b"):
         domains.add("contacts")
 
+    # Plain-English EDIT intent ("fix this", "change the background", "redraw the
+    # hand" with an image in play) — distinct from wanting a brand-NEW image
+    # ("make an image of …", "generate 3 pictures"). When edit_only is true, tool
+    # selection drops generate_image so a weak model can't regenerate instead of
+    # editing the image in front of it. No tool names required from the user.
+    _wants_new_image = has(
+        r"\b(generate|create|make|draw|render|paint)\b.{0,25}\b(images?|pictures?|art|illustration|drawing|wallpaper|portrait|scene)\b",
+        r"\b(new|another|one more|second|third|\d+)\b.{0,15}\b(images?|pictures?|versions?|variations?)\b",
+    )
+    edit_only = (
+        _img_edit_verb
+        or (_has_attachment and has(r"\b(fix|redraw|re-?draw|change|edit|restyle|clean up|touch up|improve|adjust|tweak|remove|add)\b"))
+    ) and not _wants_new_image
+
     low_signal = not continuation and not domains
     return {
         "low_signal": low_signal,
         "continuation": continuation,
         "domains": domains,
         "retrieval_query": retrieval_query,
+        "edit_only": edit_only,
     }
 
 
@@ -2018,6 +2033,13 @@ async def stream_agent_loop(
             _relevant_tools.update({"web_search", "web_fetch"})
         if "ui" in (_intent.get("domains") or set()):
             _relevant_tools.add("ui_control")
+
+    # Plain-English image-EDIT intent ("fix this", "change the background"): drop
+    # generate_image so the weak agent edits the image in front of it
+    # (restyle_image / inpaint_region) instead of making a brand-new one. Kept
+    # whenever the user actually wants a new image (classifier sets edit_only=False).
+    if _relevant_tools is not None and _intent.get("edit_only"):
+        _relevant_tools.discard("generate_image")
 
     # If a document is open the model needs the editing tools available
     # regardless of which selection path (RAG, keyword, caller-provided) ran

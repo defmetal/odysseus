@@ -42,7 +42,11 @@ services:
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-}
       - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-}
       - FASTEMBED_MODEL=${FASTEMBED_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
-      - FASTEMBED_CACHE_PATH=${FASTEMBED_CACHE_PATH:-}
+      # Default to a writable, persisted dir (under the HF cache mount) so local
+      # FastEmbed can init — an empty value makes it fail with "[Errno 2] No such
+      # file or directory: ''", which kills semantic tool/RAG/memory retrieval
+      # and forces crude keyword-only tool selection.
+      - FASTEMBED_CACHE_PATH=${FASTEMBED_CACHE_PATH:-/app/.cache/huggingface/fastembed}
       - CLEANUP_INTERVAL_HOURS=${CLEANUP_INTERVAL_HOURS:-24}
       - ODYSSEUS_INPROCESS_POLLERS=${ODYSSEUS_INPROCESS_POLLERS:-1}
       - ODYSSEUS_INPROCESS_TASKS=${ODYSSEUS_INPROCESS_TASKS:-1}
