@@ -3836,6 +3836,18 @@ async def do_inpaint_region(content: str, owner: Optional[str] = None) -> Dict:
     return await _run_studio_image_script("inpaint.py", ["--region", region, "--prompt", prompt], owner)
 
 
+async def do_controlnet(content: str, owner: Optional[str] = None) -> Dict:
+    """Turn the user's most recent uploaded sketch/reference into an on-model
+    frame whose COMPOSITION follows it (ControlNet). Line 1 = prompt (start with
+    the project's style trigger); optional line 2 = 'canny' (default) or 'scribble'."""
+    lines = [l.strip() for l in (content or "").strip().split("\n") if l.strip()]
+    if not lines:
+        return {"stdout": "", "stderr": "", "error": "A prompt is required (line 1).", "exit_code": 1}
+    prompt = lines[0]
+    control = lines[1].lower() if len(lines) > 1 and lines[1].lower() in ("canny", "scribble") else "canny"
+    return await _run_studio_image_script("controlnet.py", ["--prompt", prompt, "--control", control], owner)
+
+
 # ── Research tools ──
 
 async def do_manage_research(content: str, owner: Optional[str] = None) -> Dict:

@@ -446,7 +446,7 @@ async def _call_mcp_tool(
     # buildImageBubble on result["image_url"]). Lift it out of the tool's stdout so
     # the image renders deterministically — no dependence on the model echoing the
     # URL into its prose (which it mangles/hallucinates).
-    if tool in ("generate_image", "restyle_image", "inpaint_region"):
+    if tool in ("generate_image", "restyle_image", "inpaint_region", "controlnet"):
         _promote_image_fields(result)
 
     return result
@@ -592,7 +592,7 @@ async def _execute_tool_block_impl(
         do_list_downloads, do_cancel_download, do_search_hf_models, do_list_cached_models,
         do_list_serve_presets, do_serve_preset, do_adopt_served_model,
         do_list_cookbook_servers,
-        do_edit_image, do_restyle_image, do_inpaint_region,
+        do_edit_image, do_restyle_image, do_inpaint_region, do_controlnet,
         do_trigger_research, do_manage_research, do_resolve_contact,
         do_manage_contact,
         do_vault_search, do_vault_get, do_vault_unlock,
@@ -888,6 +888,9 @@ async def _execute_tool_block_impl(
     elif tool == "inpaint_region":
         desc = "inpaint_region"
         result = await do_inpaint_region(content, owner=owner)
+    elif tool == "controlnet":
+        desc = "controlnet"
+        result = await do_controlnet(content, owner=owner)
     elif tool == "edit_file":
         result = await _direct_fallback(tool, content) or {"error": "edit failed", "exit_code": 1}
         desc = result.get("output") or result.get("error") or "edit_file"

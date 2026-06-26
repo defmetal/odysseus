@@ -275,7 +275,7 @@ _DOMAIN_RULES = {
 }
 
 _DOMAIN_TOOL_MAP = {
-    "images": {"generate_image", "edit_image", "restyle_image", "inpaint_region"},
+    "images": {"generate_image", "edit_image", "restyle_image", "inpaint_region", "controlnet"},
     "web": {"web_search", "web_fetch", "trigger_research", "manage_research"},
     "documents": {"create_document", "edit_document", "update_document", "suggest_document", "manage_documents"},
     "email": {"list_email_accounts", "list_emails", "read_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact"},
@@ -422,6 +422,13 @@ Restyle the user's most recently UPLOADED image into the trained style (img2img)
 <prompt>
 ```
 Fix ONE part of the user's most recently UPLOADED image (inpaint). Use when they attach an image and say "fix her left hand", "redraw the face", "change the sign". Line 1 = the region to fix in plain words (e.g. "the left hand"). Line 2 = describe what to draw there in plain words — do NOT add a style trigger, it's automatic. The tool finds the image and locates the region itself — do NOT look for files, paths, masks, or run shell commands. Result lands in the Gallery.""",
+
+    "controlnet": """\
+```controlnet
+<prompt>
+<canny|scribble>
+```
+Turn the user's most recently UPLOADED sketch or reference into a finished on-model frame whose COMPOSITION follows it (ControlNet). Use when they attach a sketch/storyboard/pose/layout and say "turn this sketch into a frame", "make this on-model", "use this composition/pose". Line 1 = describe the scene in plain words — do NOT add a style trigger, it's automatic. Optional line 2 = 'canny' (default; follows a reference's edges) or 'scribble' (loose hand-drawn line-art). The tool finds the image itself — do NOT look for files or run shell commands. Heavier mode (~2 min; pauses normal image gen). Result lands in the Gallery.""",
 
     "chat_with_model": "- ```chat_with_model``` — Ask a DIFFERENT AI model and relay its answer. Line 1 = model name (or 'model@endpoint'), rest = your message. Use when the user says 'ask <model>', 'what does <model> think', or wants to compare/their answer from another model.",
     "ask_teacher": "- ```ask_teacher``` — Escalate a hard question to a more capable model. Line 1 = model name or 'auto', rest = the question. Use when stuck or need expert knowledge.",
@@ -810,6 +817,9 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         r"\bfix\b.{0,40}\b(hand|hands|face|eyes?|fingers?|mouth|hair|arms?|legs?|background|expression)\b",
         r"\b(in (?:my|the toei|toei|the 90s)|my) style\b",
         r"\bedit (?:this|the|my) (?:image|picture|photo|frame|drawing|illustration|art)\b",
+        r"\bon.?model\b",
+        r"\b(turn|make)\b.{0,25}\b(sketch|storyboard|pose|line ?art|drawing|reference)\b.{0,25}\b(into|frame|on.?model)\b",
+        r"\b(use|follow|match)\b.{0,15}\b(this|the|my)\b.{0,8}\b(pose|composition|layout|sketch)\b",
     )
     # When an image is attached, treat a bare edit verb (fix/redraw/change/edit)
     # as an image-edit request too — the attachment is the object being edited.
