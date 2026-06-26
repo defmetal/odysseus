@@ -47,8 +47,9 @@ Suggested first read for a fresh agent: ARCHITECTURE.md then ODYSSEUS.md.
   VRAM now); Ollama auto-swaps its own models. So art and heavy-LLM (35B/Cydonia)
   time-share the GPU — expect a ~1-3 min model-load when switching modes.
 - **Image editing via TOOLS:** `generate_image`, `restyle_image` (img2img on the
-  latest upload), `inpaint_region` (fix a region by plain words — "fix her left
-  hand"). For RELIABLE one-shot gen, Chat-tab → Z-Image direct beats the agent
+  latest upload), `inpaint_region` (fix a region — "fix her left hand"),
+  `controlnet` (sketch/reference → on-model frame that follows its composition;
+  bf16 swap-in, ~2 min). For RELIABLE one-shot gen, Chat-tab → Z-Image direct beats the agent
   (the abliterated 8B is a flaky tool-driver).
 - Odysseus runs in Docker (`odysseus-odysseus-1`); LAN at `http://alienwaretv:7000`.
 
@@ -86,8 +87,11 @@ Suggested first read for a fresh agent: ARCHITECTURE.md then ODYSSEUS.md.
 1. v2 dataset + Base-native retrain (backgrounds, hands, more Cutie Honey Flash).
 2. Character LoRAs (Fumiko first — identity locked, outfits promptable; see
    TRAINING-GUIDE.md). Bootstrap via img2img from her design sheets.
-3. ControlNet (storyboard sketch → posed on-model frame) — the one capability
-   not yet built; may use ComfyUI headless (parked at `C:\Users\austi\ComfyUI`).
+3. ✅ ControlNet DONE (2026-06-26) — native (NO ComfyUI) via
+   `data/studio/scripts/controlnet.py` + the `controlnet` agent tool: bf16
+   ZImageControlNetPipeline + alibaba-pai Union controlnet + the v2 style LoRA,
+   canny/scribble, conditioning ~0.45. Heavier bf16 swap-in mode (~2 min, pauses
+   FP8 gen). NEXT: pose/depth via `controlnet_aux` on the same pipeline.
 4. Video (Wan 2.2) and voices (Chatterbox TTS) — later.
 
 CLAUDE.md and AGENTS.md are IDENTICAL copies (keep in sync manually — a Windows
