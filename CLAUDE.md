@@ -26,10 +26,11 @@ Suggested first read for a fresh agent: ARCHITECTURE.md then ODYSSEUS.md.
 ## The current stack (as of 2026-06-25)
 - **Image model: Z-Image-Base, FP8, served by `scripts/diffusion_server.py` on
   port 8100** with the Base-native style LoRA `data/studio/training/
-  toei90s_zbase_v1/toei90s_zbase_v1.safetensors`, launched `--guidance 4.5
+  toei90s_zbase_v2/toei90s_zbase_v2.safetensors`, launched `--guidance 4.5
   --steps 30 --quantize-fp8 --style-config data/studio/scripts/styles.json
-  --idle-unload-seconds 300`. (Beat Turbo in an A/B; Turbo + its base model were
-  deleted.) The server AUTO-STARTS with the container (docker/studio.yml overlay
+  --idle-unload-seconds 300`. (v2 = v1 + 65 hand-made backgrounds → clean,
+  coherent scenery; v1 kept as fallback. Beat Turbo in an A/B; Turbo deleted.)
+  The server AUTO-STARTS with the container (docker/studio.yml overlay
   → `data/studio/scripts/start-studio.sh`) — no manual launch needed.
 - **Style trigger is automatic** — the server auto-prepends `toei90s style,
   smoon` (or maps "90s anime"/"cutie honey"/etc. via `styles.json`). Never type
