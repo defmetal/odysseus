@@ -16,6 +16,7 @@ one(s) relevant to your task** (don't load them all every time):
 | `data/studio/OPERATIONS.md` | running it day-to-day — generate, reboot, serve, sync the repo, troubleshoot |
 | `data/studio/V2-WISHLIST.md` | gathering more training stills (what's underrepresented) |
 | `data/studio/UPGRADES-2026.md` | planning future upgrades — ComfyUI/ControlNet, video (Wan 2.2/LTX-2), web-search/RAG. Research-backed w/ sources (by Cowork); has a 2026-06-20 status header on what's already done |
+| `data/studio/UPSTREAM-MERGE-PENDING.md` | doing the big upstream sync — fork is 344 commits behind (mostly security/stability + a `tool_implementations.py`→`src/tools/` refactor). The merge playbook: changelog, the 4 conflicts, which studio patches re-home where, the Python-3.14 track, execution steps + rollback, and who-does-it (Cowork preps, Claude Code executes) |
 | `data/skills/studio/animation-studio-pipeline/SKILL.md` | what the in-app Odysseus agent itself knows |
 
 (`data/` is gitignored — these exist on this machine but not in a fresh clone.
