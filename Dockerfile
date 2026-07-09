@@ -3,6 +3,10 @@
 # CPython 3.12 (cp312 wheels). Bumping the base Python minor version (e.g. to
 # 3.14) makes /app/.local/lib/python3.12/site-packages unimportable and breaks
 # image generation. Keep this at 3.12 unless the /app/.local stack is rebuilt.
+# NOTE (2026-07-09 merge): upstream/dev moved to python:3.14 + a Real-ESRGAN
+# wheel-builder stage (PEP-667 workaround for Python 3.13+). We deliberately
+# STAY on 3.12 (that break doesn't exist here, and the torch stack requires
+# 3.12), so that builder stage — and the COPY --from below — is dropped.
 FROM python:3.12-slim
 
 # System deps. tmux is required by Cookbook for background downloads/serves.
@@ -23,7 +27,43 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tmux \
     openssh-client \
     gosu \
+    libgl1 \
+    libglib2.0-0t64 \
+    libxcb1 \
+    libmagic1 \
     && rm -rf /var/lib/apt/lists/*
+
+# libgl1/libglib2.0-0t64/libxcb1 are runtime shared libs (libGL.so.1,
+# libglib-2.0/libgthread, libxcb.so.1) that opencv-python (cv2) loads. The
+# slim base omits them, so the Cookbook "install realesrgan" path imports cv2
+# and dies with `libxcb.so.1: cannot open shared object file` despite a clean
+# pip install. Using full opencv-python (not -headless) because basicsr/gfpgan/
+# facexlib/realesrgan all depend on the `opencv-python` distribution by name.
+#
+# libmagic1 is the shared lib (libmagic.so.1) that python-magic dlopens for
+# content-based MIME sniffing in src/upload_handler.py. We install both here
+# (libmagic1 + the python-magic wrapper, below) rather than in requirements.txt
+# because python-magic resolves libmagic at import time: where the lib is
+# absent the import can block or raise, so keeping it image-only avoids
+# regressing pip/venv installs on hosts without libmagic. Debian always has the
+# lib here, so the import is instant and detection actually works.
+
+# Docker CLI (client only — daemon stays on the host via the
+# /var/run/docker.sock mount). The Debian `docker.io` package ships
+# dockerd but not the client binary on slim, so grab the static client
+# tarball from download.docker.com instead.
+ARG DOCKER_CLI_VERSION=27.5.1
+RUN ARCH="$(dpkg --print-architecture)" \
+    && case "$ARCH" in \
+         amd64) DARCH=x86_64 ;; \
+         arm64) DARCH=aarch64 ;; \
+         *) echo "unsupported arch $ARCH"; exit 1 ;; \
+       esac \
+    && curl -fsSL "https://download.docker.com/linux/static/stable/${DARCH}/docker-${DOCKER_CLI_VERSION}.tgz" \
+       -o /tmp/docker.tgz \
+    && tar -xzf /tmp/docker.tgz -C /tmp \
+    && install -m 0755 /tmp/docker/docker /usr/local/bin/docker \
+    && rm -rf /tmp/docker /tmp/docker.tgz
 
 WORKDIR /app
 
@@ -33,6 +73,16 @@ ARG INSTALL_OPTIONAL=false
 COPY requirements.txt requirements-optional.txt ./
 RUN pip install --no-cache-dir -r requirements.txt \
     && if [ "$INSTALL_OPTIONAL" = "true" ]; then pip install --no-cache-dir -r requirements-optional.txt; fi
+
+# python-magic powers content-based MIME sniffing in src/upload_handler.py.
+# Image-only (not in requirements.txt) because it needs the libmagic1 system
+# lib installed above; see the apt note near the top of this stage.
+RUN pip install --no-cache-dir python-magic==0.4.27
+
+# (Dropped for our pinned 3.12: upstream pre-installs patched basicsr/gfpgan/
+# facexlib wheels from a python:3.14 realesrgan-wheels builder stage to dodge a
+# PEP-667 break on 3.13+. On 3.12 that break doesn't exist, so Cookbook's
+# `pip install realesrgan` resolves those deps normally — no builder needed.)
 
 # Copy app code
 COPY . .

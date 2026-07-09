@@ -107,7 +107,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not model_spec:
             for candidate in ("gpt-image-1.5", "gpt-image-1", "dall-e-3"):
                 try:
-                    _resolve_model(candidate)
+                    await asyncio.to_thread(_resolve_model, candidate)
                     model_spec = candidate
                     break
                 except ValueError:
@@ -119,14 +119,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 return [TextContent(type="text", text="Error: No image model found. Configure one in Admin.")]
 
         try:
-            url, model_id, headers = _resolve_model(model_spec)
+            url, model_id, headers = await asyncio.to_thread(_resolve_model, model_spec)
         except ValueError:
             # Agent models sometimes pass invented names (or a size string)
             # as the model — recover via the first local image endpoint.
             _fb = _first_local_image_model()
             if not _fb:
                 return [TextContent(type="text", text=f"Error: No endpoint found with image model '{model_spec}'.")]
-            url, model_id, headers = _resolve_model(_fb)
+            url, model_id, headers = await asyncio.to_thread(_resolve_model, _fb)
 
         is_gpt_image = "gpt-image" in model_id.lower()
         base_url = url.replace("/chat/completions", "").replace("/v1/messages", "").rstrip("/")
