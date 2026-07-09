@@ -114,14 +114,21 @@ Suggested first read for a fresh agent: ARCHITECTURE.md then ODYSSEUS.md.
    FP8 gen). NEXT: pose/depth via `controlnet_aux` on the same pipeline.
 4. Video (Wan 2.2) and voices (Chatterbox TTS) — later.
 
-## In-flight / uncommitted (2026-07-09) — READ before a rebuild or `git` op
-- **UNCOMMITTED src patches** (cp'd into the container, live; survive restart but a
-  `docker compose down/up` recreate or `git stash/reset` would REVERT them — commit +
-  rebuild to bake): `src/agent_loop.py` (agent now DETECTS attached images →
-  "fix this"/"make her hair red" route to restyle/inpaint instead of a new image),
-  `src/tool_implementations.py` (restyle_image optional strength line: light/medium/full
-  or 0-1), `scripts/diffusion_server.py` (Z-Image-General variant — MOUNTED via
-  studio.yml so it's live without a rebuild). Not yet user-verified end-to-end in the UI.
+## Post-upstream-merge state (2026-07-09) — SYNCED to upstream/dev
+- **Merged upstream/dev (344 commits) — committed `2cfb5b3`, pushed, and REBUILT/BAKED
+  (py3.12).** All studio patches survived: the studio image tools (`do_restyle_image`
+  +strength, `do_inpaint_region`, `do_controlnet`, `_run_studio_image_script`) were
+  RE-HOMED into `src/tools/image.py` (upstream split tool_implementations.py into the
+  `src/tools/` package, #4423) and re-exported via the `src.tool_implementations` facade;
+  the attachment edit-routing (`_latest_user_has_image`/`edit_only`) + Z-Image-General
+  are intact. Kept `FROM python:3.12-slim` (dropped upstream's 3.14 + Real-ESRGAN builder
+  — the cp312 torch stack in `/app/.local` requires 3.12). VERIFIED: 4520 tests pass (8
+  are container-env/docs artifacts, not code), image gen works for both variants, agent
+  edit-routing fires, `manage_bg_jobs` (new) loads. Rollback: branch `dev-premerge-backup`
+  + images `pre-merge-2026-07-09` / `merged-2026-07-09`. **Every FUTURE upstream sync will
+  re-conflict on the Dockerfile (keep 3.12 — 1 line) + must re-home any NEW studio edits
+  to tool files into `src/tools/`.** See `data/studio/UPSTREAM-MERGE-PENDING.md` (marked
+  DONE for this round; it stays as the playbook for the next sync + the Python-3.14 track).
 - **New machine-local scripts** in `data/studio/scripts/` (data/ is GITIGNORED, so
   they are NOT in the repo / a fresh clone): `dedup_dataset.py`, `controlnet_batch.py`,
   `test_char_style.py` (char+style combined render), `ab_compare.py` (fixed-seed LoRA
