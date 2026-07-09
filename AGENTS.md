@@ -35,6 +35,16 @@ Suggested first read for a fresh agent: ARCHITECTURE.md then ODYSSEUS.md.
 - **Style trigger is automatic** — the server auto-prepends `toei90s style,
   smoon` (or maps "90s anime"/"cutie honey"/etc. via `styles.json`). Never type
   the trigger; just describe the scene.
+- **Two model ids, one server (general mode):** `/v1/models` advertises
+  `Z-Image` (styled: LoRA + auto-trigger) AND `Z-Image-General` (plain Base, no
+  LoRA, no trigger — for non-studio/general images). Pick either in the Chat-tab
+  model dropdown; the server swap-LOADS the chosen variant on demand. Because FP8
+  fuses the LoRA at load, the two can't co-reside in one copy, so switching
+  styled↔general costs a ~1-2 min reload (same as the LLM/ControlNet GPU swap);
+  within a variant it's instant. Logic lives in `scripts/diffusion_server.py`
+  (`_resolve_variant`/`_with_model` swap + `_variant`-gated `_styled`/`load_model`).
+  Endpoint `bc38130a` `cached_models` must list both ids for the dropdown to show
+  `Z-Image-General`.
 - **LLMs (all Ollama @ host.docker.internal:11434, wired in data/settings.json):**
   default chat = `huihui_ai/Qwen3.6-abliterated:27b` (UNCENSORED — no fiction
   refusals), utility = `qwen3.5:4b`, vision/agent = `huihui_ai/qwen3-vl-abliterated:8b`
@@ -84,15 +94,39 @@ Suggested first read for a fresh agent: ARCHITECTURE.md then ODYSSEUS.md.
   put `null` in OLLAMA_ORIGINS — it panics Ollama on boot; `*` alone covers it.
 
 ## Roadmap (each ~one focused session)
-1. v2 dataset + Base-native retrain (backgrounds, hands, more Cutie Honey Flash).
-2. Character LoRAs (Fumiko first — identity locked, outfits promptable; see
-   TRAINING-GUIDE.md). Bootstrap via img2img from her design sheets.
+1. ✅ v2 style LoRA SERVED (backgrounds). v3 (bigger sailor-moon set) was TRAINED +
+   A/B'd but KEPT v2 — v3 regressed backgrounds (dilution) + didn't improve hands;
+   v3 lives at training/toei90s_zbase_v3/ as a fallback only.
+2. Character LoRAs — IN PROGRESS (2026-07-09). Round 1 = Tetsuya on line art: a rough
+   proof, UNDER-CONVERGED (line art is too thin a signal). BIG LEARNINGS in
+   TRAINING-GUIDE.md — read that section before touching character LoRAs. Short
+   version: COLORED images are the dense fuel (line art alone doesn't lock identity);
+   trigger = `<name>_oc`; the production setup is character LoRA + style LoRA TOGETHER;
+   train the COLOR-RICH characters FIRST. Cast is ~35-40 chars (property "Marzipan";
+   mains Marzipan/Bon bon/Tetsuya/Drossel + Naomi). NEXT: train a character who HAS
+   colored sheets (Tetsuya is color-poor → parked).
 3. ✅ ControlNet DONE (2026-06-26) — native (NO ComfyUI) via
    `data/studio/scripts/controlnet.py` + the `controlnet` agent tool: bf16
    ZImageControlNetPipeline + alibaba-pai Union controlnet + the v2 style LoRA,
    canny/scribble, conditioning ~0.45. Heavier bf16 swap-in mode (~2 min, pauses
    FP8 gen). NEXT: pose/depth via `controlnet_aux` on the same pipeline.
 4. Video (Wan 2.2) and voices (Chatterbox TTS) — later.
+
+## In-flight / uncommitted (2026-07-09) — READ before a rebuild or `git` op
+- **UNCOMMITTED src patches** (cp'd into the container, live; survive restart but a
+  `docker compose down/up` recreate or `git stash/reset` would REVERT them — commit +
+  rebuild to bake): `src/agent_loop.py` (agent now DETECTS attached images →
+  "fix this"/"make her hair red" route to restyle/inpaint instead of a new image),
+  `src/tool_implementations.py` (restyle_image optional strength line: light/medium/full
+  or 0-1), `scripts/diffusion_server.py` (Z-Image-General variant — MOUNTED via
+  studio.yml so it's live without a rebuild). Not yet user-verified end-to-end in the UI.
+- **New machine-local scripts** in `data/studio/scripts/` (data/ is GITIGNORED, so
+  they are NOT in the repo / a fresh clone): `dedup_dataset.py`, `controlnet_batch.py`,
+  `test_char_style.py` (char+style combined render), `ab_compare.py` (fixed-seed LoRA
+  A/B), `cutover-general-mode.sh`, and `dataset/characters/tetsuya/_gen_captions.py`.
+- **COWORK CAVEAT:** the real knowledge lives in `data/studio/*.md` which is GITIGNORED —
+  a fresh cloud clone WON'T have it. A Cowork session must run where `data/` exists (this
+  machine) to see ARCHITECTURE/ODYSSEUS/TRAINING-GUIDE/OPERATIONS, or it's flying blind.
 
 CLAUDE.md and AGENTS.md are IDENTICAL copies (keep in sync manually — a Windows
 symlink needs admin). AGENTS.md is for non-Claude-Code tools (e.g. Hermes).

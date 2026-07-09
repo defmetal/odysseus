@@ -3817,13 +3817,37 @@ async def _run_studio_image_script(script: str, cli_args: list, owner: Optional[
     return {"stdout": out, "stderr": "", "output": out, "exit_code": 0}
 
 
+# Strength keywords -> img2img denoising strength (how far from the input). The
+# studio's core use is converting an image TOWARD the style, so restyle.py's
+# default already leans strong; these let the agent go fuller or gentler.
+_RESTYLE_STRENGTH = {
+    "light": 0.45, "subtle": 0.45, "slight": 0.45, "gentle": 0.45,
+    "medium": 0.6, "moderate": 0.6,
+    "full": 0.8, "strong": 0.8, "complete": 0.8, "heavy": 0.8, "max": 0.85,
+}
+
+
 async def do_restyle_image(content: str, owner: Optional[str] = None) -> Dict:
     """Restyle the user's most recent uploaded image into the trained style (img2img).
-    Line 1 = prompt (start with the project's style trigger)."""
-    prompt = (content or "").strip().split("\n", 1)[0].strip()
-    if not prompt:
+    Line 1 = prompt (start with the project's style trigger).
+    Line 2 (optional) = strength: a keyword (light / medium / full) OR a 0.0-1.0
+    number — higher = a fuller repaint into the style (e.g. photo -> anime)."""
+    lines = [l.strip() for l in (content or "").strip().split("\n") if l.strip()]
+    if not lines:
         return {"stdout": "", "stderr": "", "error": "A prompt is required (line 1).", "exit_code": 1}
-    return await _run_studio_image_script("restyle.py", ["--prompt", prompt], owner)
+    args = ["--prompt", lines[0]]
+    if len(lines) > 1:
+        s = lines[1].lower()
+        strength = _RESTYLE_STRENGTH.get(s)
+        if strength is None:
+            try:
+                v = float(s)
+                strength = v if 0.0 < v <= 1.0 else None
+            except ValueError:
+                strength = None
+        if strength is not None:
+            args += ["--strength", str(strength)]
+    return await _run_studio_image_script("restyle.py", args, owner)
 
 
 async def do_inpaint_region(content: str, owner: Optional[str] = None) -> Dict:

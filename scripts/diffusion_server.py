@@ -52,6 +52,26 @@ _args = None
 # trigger so callers never type the exact trigger. Loaded from --style-config.
 _apply_style = None
 
+# Style variant: with FP8 the style LoRA is fused into the weights at load, so a
+# single loaded pipeline is permanently either "styled" (LoRA + auto-trigger) or
+# "general" (plain base, no LoRA, no trigger). They can't coexist in one copy, so
+# we expose them as two model ids ("Z-Image" / "Z-Image-General") and swap-load on
+# demand. _variant = what's loaded now; _target_variant = what the next load_model()
+# should build. "general" is only offered when a --lora is actually configured.
+_variant = None          # "styled" | "general" | None (unloaded)
+_target_variant = "styled"
+_GENERAL_SUFFIX = "-General"
+
+
+def _resolve_variant(req) -> str:
+    """Map an incoming request's model id to a variant. Anything containing
+    'general' (e.g. 'Z-Image-General') -> general; otherwise styled. Requests
+    with no model field (some img2img/inpaint callers) default to styled."""
+    mid = (getattr(req, "model", "") or "").lower()
+    if _args is not None and getattr(_args, "lora", "") and "general" in mid:
+        return "general"
+    return "styled"
+
 # Idle-unload: release GPU VRAM after a stretch with no image requests so another
 # GPU process (e.g. an Ollama LLM) can use the card; the model auto-reloads on the
 # next request. _load_lock guards all _pipe / _active state transitions.
@@ -79,7 +99,10 @@ def _load_style_config(path: str):
 
 
 def _styled(prompt: str) -> str:
-    """Apply the style trigger if configured; otherwise return prompt unchanged."""
+    """Apply the style trigger if configured; otherwise return prompt unchanged.
+    In the 'general' variant the LoRA is not loaded, so skip the trigger too."""
+    if _variant == "general":
+        return prompt
     try:
         return _apply_style(prompt) if _apply_style else prompt
     except Exception:
@@ -190,8 +213,9 @@ def _fix_meta_tensors(pipe, dtype):
 
 
 def load_model():
-    global _pipe, _model_id
+    global _pipe, _model_id, _variant
     import diffusers
+    _use_lora = bool(_args.lora) and _target_variant == "styled"
 
     model_path = _args.model
     _model_id = Path(model_path).name
@@ -488,8 +512,9 @@ def load_model():
 
     logger.info(f"Model loaded: {_model_id}")
 
-    # Load LoRA weights if specified
-    if _args.lora:
+    # Load LoRA weights if specified (skipped for the 'general' variant, which
+    # serves the plain base with no style).
+    if _use_lora:
         for lora_path in _args.lora.split(','):
             lora_path = lora_path.strip()
             if not lora_path:
@@ -513,7 +538,7 @@ def load_model():
     # linears is unreliable). Roughly halves VRAM at minor quality cost.
     if getattr(_args, "quantize_fp8", False):
         try:
-            if _args.lora:
+            if _use_lora:
                 _pipe.fuse_lora()
                 _pipe.unload_lora_weights()
                 logger.info("Fused LoRA into base weights before quantization")
@@ -540,6 +565,9 @@ def load_model():
         except Exception as e:
             logger.warning(f"FP8 quantization failed (serving unquantized): {e}")
 
+    _variant = _target_variant
+    logger.info(f"Variant loaded: {_variant} (style LoRA {'on' if _use_lora else 'off'})")
+
 
 def _touch():
     global _last_activity
@@ -551,13 +579,14 @@ def _unload_model():
     (e.g. an Ollama LLM) can use it. Caller must hold _load_lock. The model
     reloads automatically on the next request. The process stays alive holding
     only the small CUDA context (~0.5GB), so ~all of the model VRAM is freed."""
-    global _pipe, _inpaint_pipe, _img2img_pipe
+    global _pipe, _inpaint_pipe, _img2img_pipe, _variant
     if _pipe is None:
         return
     logger.info("Idle-unload: releasing GPU VRAM (reloads on next request)")
     _pipe = None
     _inpaint_pipe = None
     _img2img_pipe = None
+    _variant = None
     gc.collect()
     try:
         torch.cuda.empty_cache()
@@ -592,9 +621,18 @@ def _with_model(fn):
     original (typed) signature so FastAPI still parses the request body."""
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        global _active
+        global _active, _target_variant
+        # Pick the styled/general variant from the request's model id and swap-load
+        # if it differs from what's resident (FP8 fuses the LoRA, so variants can't
+        # share one loaded copy — this costs a reload, like the LLM GPU swap).
+        req = args[0] if args else next(iter(kwargs.values()), None)
+        want = _resolve_variant(req)
         with _load_lock:
+            if _pipe is not None and _variant != want:
+                logger.info(f"Variant swap: {_variant} -> {want} (reloading)")
+                _unload_model()
             if _pipe is None:
+                _target_variant = want
                 load_model()
             _active += 1
             _touch()
@@ -609,13 +647,15 @@ def _with_model(fn):
 
 @app.get("/v1/models")
 def list_models():
+    ids = [_model_id]
+    # Offer the un-styled base as a second selectable model when a style LoRA is
+    # configured (otherwise "general" would be identical to the only model).
+    if _args is not None and getattr(_args, "lora", ""):
+        ids.append(_model_id + _GENERAL_SUFFIX)
     return {
         "data": [
-            {
-                "id": _model_id,
-                "object": "model",
-                "owned_by": "local",
-            }
+            {"id": mid, "object": "model", "owned_by": "local"}
+            for mid in ids
         ]
     }
 

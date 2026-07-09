@@ -413,8 +413,9 @@ Generate an image. Line 1 = description, line 2 = model name (LEAVE EMPTY to use
     "restyle_image": """\
 ```restyle_image
 <prompt>
+<strength: optional>
 ```
-Restyle the user's most recently UPLOADED image into the trained style (img2img). Use when they attach an image and say "restyle this", "make this in my style", "redraw this in 90s anime / sailor moon / cutie honey style". Line 1 = describe the image in plain words. Do NOT add a style trigger — it's applied automatically. If the user names a style ("90s anime", "cutie honey", "sailor moon look"), include their wording; otherwise the house style is used. The tool finds the uploaded image itself — do NOT look for files, paths, or run shell commands. Result lands in the Gallery.""",
+Restyle the user's most recently UPLOADED image into the trained style (img2img). Use when they attach an image and say "restyle this", "make this in my style", "redraw this in 90s anime / sailor moon / cutie honey style", "convert this to the style". Line 1 = describe the image in plain words. Do NOT add a style trigger — it's applied automatically. If the user names a style ("90s anime", "cutie honey", "sailor moon look"), include their wording; otherwise the house style is used. OPTIONAL line 2 = how hard to repaint: `full` for a complete conversion (e.g. a photo or off-style image -> anime), `light` to keep most of the original, or leave it off for the balanced default. Use `full` when they say "convert/fully/completely/turn this into the style". The tool finds the uploaded image itself — do NOT look for files, paths, or run shell commands. Result lands in the Gallery.""",
 
     "inpaint_region": """\
 ```inpaint_region
@@ -781,6 +782,37 @@ def _assistant_requested_followup(messages: List[Dict]) -> bool:
     return False
 
 
+def _latest_user_has_image(messages: List[Dict]) -> bool:
+    """True if the most recent user turn carries an image attachment.
+
+    Attachments arrive as multimodal content parts (``{"type": "image_url", ...}``)
+    or an embedded ``data:image`` URI — NOT as any text marker. The classifier
+    used to look for a literal ``"[image attached"`` string that nothing ever
+    injected, so edit intent on an attached image was never detected and the
+    model defaulted to generate_image (a brand-new picture). This inspects the
+    actual message structure instead.
+    """
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            for b in content:
+                if not isinstance(b, dict):
+                    continue
+                if b.get("type") in ("image_url", "image", "input_image"):
+                    return True
+                if "image_url" in b or "image_data" in b:
+                    return True
+                if isinstance(b.get("text"), str) and "data:image" in b["text"]:
+                    return True
+            return False
+        if isinstance(content, str):
+            return "data:image" in content
+        return False
+    return False
+
+
 def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, object]:
     """Classify only whether this turn deserves domain tool retrieval.
 
@@ -821,10 +853,17 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         r"\b(turn|make)\b.{0,25}\b(sketch|storyboard|pose|line ?art|drawing|reference)\b.{0,25}\b(into|frame|on.?model)\b",
         r"\b(use|follow|match)\b.{0,15}\b(this|the|my)\b.{0,8}\b(pose|composition|layout|sketch)\b",
     )
-    # When an image is attached, treat a bare edit verb (fix/redraw/change/edit)
-    # as an image-edit request too — the attachment is the object being edited.
-    _has_attachment = "[image attached" in q
-    if _img_edit_verb or (_has_attachment and has(r"\b(fix|redraw|re-?draw|change|edit|restyle|clean up|touch up)\b")):
+    # When an image is attached, the DEFAULT intent is to EDIT it (you attached
+    # it for a reason) unless the message explicitly asks for a brand-NEW image.
+    # So an attachment alone -> images domain + edit tools, which catches the
+    # verb-less phrasings the old check missed ("make her hair red", "give her a
+    # hat", "darker background", "remove the cup").
+    _has_attachment = _latest_user_has_image(messages) or ("[image attached" in q)
+    _wants_new_image = has(
+        r"\b(generate|create|make|draw|render|paint)\b.{0,25}\b(images?|pictures?|art|illustration|drawing|wallpaper|portrait|scene)\b",
+        r"\b(new|another|one more|second|third|\d+)\b.{0,15}\b(images?|pictures?|versions?|variations?)\b",
+    )
+    if _img_edit_verb or (_has_attachment and not _wants_new_image):
         domains.add("images")
     if has(r"\b(cookbook|serve|serving|served|launch|start|preset|vllm|sglang|llama\.?cpp|ollama|download|downloading|pull|cached models?|running models?|model servers?|models? (?:are )?running|what models?|model picker|gpu box|kierkegaard|odysseus|ajax|qwen|gemma|llama|mistral|minimax)\b"):
         domains.add("cookbook")
@@ -868,14 +907,10 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     # ("make an image of …", "generate 3 pictures"). When edit_only is true, tool
     # selection drops generate_image so a weak model can't regenerate instead of
     # editing the image in front of it. No tool names required from the user.
-    _wants_new_image = has(
-        r"\b(generate|create|make|draw|render|paint)\b.{0,25}\b(images?|pictures?|art|illustration|drawing|wallpaper|portrait|scene)\b",
-        r"\b(new|another|one more|second|third|\d+)\b.{0,15}\b(images?|pictures?|versions?|variations?)\b",
-    )
-    edit_only = (
-        _img_edit_verb
-        or (_has_attachment and has(r"\b(fix|redraw|re-?draw|change|edit|restyle|clean up|touch up|improve|adjust|tweak|remove|add)\b"))
-    ) and not _wants_new_image
+    # _wants_new_image is computed above (hoisted so the images-domain check can
+    # use it). With an image in play, anything that isn't an explicit new-image
+    # request is treated as an edit so the model can't regenerate from scratch.
+    edit_only = (_img_edit_verb or _has_attachment) and not _wants_new_image
 
     low_signal = not continuation and not domains
     return {
