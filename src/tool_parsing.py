@@ -1270,14 +1270,18 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
                 continue
             tag, content = call
             if not content:
-                # An empty fence is still an unambiguous call for the email
-                # tools — ```list_email_accounts``` with no body is a shape
-                # local models really emit for no-arg tools. Dispatch with
-                # empty args and let the tool's own validation answer;
-                # silently dropping the call left models concluding email was
-                # broken. Other tags (bash, python, ...) keep skipping: empty
-                # content is nothing to run.
-                if tag in BUILTIN_EMAIL_TOOLS:
+                # An empty fence is still an unambiguous call for tools that
+                # take no required args — ```list_email_accounts``` (or
+                # ```task_list```) with no body is a shape local models really
+                # emit for no-arg/all-optional-arg tools. Dispatch with empty
+                # args and let the tool's own validation answer; silently
+                # dropping the call left models concluding the feature was
+                # broken (the same failure mode BUILTIN_EMAIL_TOOLS was
+                # fixed for — task_list's "what's on the board" with no
+                # status filter is the identical shape). Other tags (bash,
+                # python, task_add/task_move/task_update which REQUIRE an
+                # arg) keep skipping: empty content is nothing to run.
+                if tag in BUILTIN_EMAIL_TOOLS or tag == "task_list":
                     blocks.append(ToolBlock(tag, ""))
                 continue
             # If a code block's content is an <invoke> XML call (some models wrap

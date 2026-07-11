@@ -296,6 +296,11 @@ _DOMAIN_RULES = {
 - Notes/todos/reminders use `manage_notes`, not memory.
 - Calendar create/update/delete should call `manage_calendar` with `action=list_calendars` first.
 - Recurring/automatic/scheduled requests create a `manage_tasks` task; do not just perform the action once.""",
+    "board": """\
+## Production board rules
+- The studio's production board (todo/doing/done work items for the animation studio) uses `task_add`/`task_move`/`task_list`/`task_update`. It is SHARED — both users see and edit the same board; it is NOT the same thing as `manage_tasks` (scheduled/recurring AI jobs) or `manage_notes` (personal reminders/todos) — do not confuse them.
+- To add a work item, use `task_add`. To change its status use `task_move` (not `task_update`). To rename/reassign/re-tag WITHOUT changing status, use `task_update`. To view the board, use `task_list`.
+- If `task_move`/`task_update` reports multiple matching tasks, show the candidates and ask which one, or reuse the exact id from `task_list` — never guess.""",
     "ui": """\
 ## UI rules
 - "Open/show <panel>" uses `ui_control open_panel <name>`.
@@ -332,6 +337,7 @@ _DOMAIN_TOOL_MAP = {
     "email": {"list_email_accounts", "list_emails", "read_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact"},
     "cookbook": {"download_model", "serve_model", "serve_preset", "list_serve_presets", "list_served_models", "stop_served_model", "tail_serve_output", "list_downloads", "cancel_download", "search_hf_models", "list_cached_models", "list_cookbook_servers", "adopt_served_model"},
     "notes_calendar_tasks": {"manage_notes", "manage_calendar", "manage_tasks"},
+    "board": {"task_add", "task_move", "task_list", "task_update"},
     "ui": {"ui_control"},
     "sessions": {"create_session", "list_sessions", "manage_session", "send_to_session", "search_chats"},
     "files": {"bash", "python", "read_file", "write_file", "edit_file", "grep", "glob", "ls", "get_workspace", "manage_bg_jobs"},
@@ -547,6 +553,33 @@ If `dtend` omitted, defaults to dtstart+1h (or +1d when `all_day: true`). \
 For a RECURRING event pass `rrule` as an iCalendar RRULE string, e.g. `"FREQ=WEEKLY;BYDAY=MO"` (every Monday), `"FREQ=DAILY;COUNT=10"`, or `"FREQ=MONTHLY;BYMONTHDAY=1"` — create ONE event with the rrule, do not loop creating many events. Do not pass `rrule` for "next Wednesday only", "just this once", or any single occurrence. \
 If the user asks for a reminder/alarm before the event, pass `reminder_minutes` as an integer; do not write reminder text into the event description and do NOT also call `manage_notes` for the same reminder because calendar reminders are routed through Notes automatically. \
 `calendar` accepts a name ("Main") or short-id prefix.""",
+    "task_add": """\
+```task_add
+<title>
+status: <todo|doing|done, optional — default todo>
+assignee: <name, optional>
+tags: <comma-separated tags, optional>
+```
+Add a work item to the studio's SHARED production board — NOT a scheduled/recurring AI job (that's `manage_tasks`) and NOT a personal reminder (that's `manage_notes`). Line 1 = the task title. Optional lines: `status:` (todo/doing/done, default todo), `assignee:` (a name), `tags:` (comma-separated). Omit any optional line you don't need — do not echo the placeholder text literally. The board is shared: every user sees every task.""",
+    "task_move": """\
+```task_move
+<task id or title>
+<new status: todo|doing|done>
+```
+Move a task on the shared production board to a new status. Line 1 identifies the task — paste the id shown by `task_list`, or the task's title (fuzzy-matched). Line 2 = the new status (todo/doing/done). If the title matches more than one task, the tool returns the candidates instead of guessing — relay them to the user (or pick contextually) and retry with the exact id.""",
+    "task_list": """\
+```task_list
+<status filter: todo|doing|done — optional>
+```
+Show the studio's shared production board. Leave the body empty for everything grouped into Todo/Doing/Done columns, or put a single status on line 1 to see only that column. Use this for "what's on the board", "what's in doing/todo/done", "show the production board".""",
+    "task_update": """\
+```task_update
+<task id or title>
+title: <new title, optional>
+assignee: <new assignee, optional>
+tags: <new comma-separated tags, optional>
+```
+Retitle, reassign, or re-tag an existing production-board task WITHOUT changing its status (use `task_move` for status changes). Line 1 identifies the task (id or fuzzy title, same resolution as `task_move`). Include only the field(s) you're changing.""",
     "create_session": "- ```create_session``` — Create a new chat. Line 1 = chat name, line 2 = model name. Use for background/parallel work.",
     "list_sessions": "- ```list_sessions``` — List chats sorted MOST-RECENT FIRST (the UI calls them 'chats') with clickable chat-title links. Output includes a relative \"last active\" timestamp per row, so the first row is the user's most recent chat. Content = optional filter keyword (matches chat name). When answering, preserve the `[title](#session-id)` links exactly; do not convert them into plain text.",
     "send_to_session": "- ```send_to_session``` — Send a message to another session. Line 1 = session_id, rest = message. Use for orchestrating work across sessions.",
@@ -1105,6 +1138,23 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         domains.add("notes_calendar_tasks")
     if has(r"\b(calendar|event|meeting|appointment|schedule)\b"):
         domains.add("notes_calendar_tasks")
+    # Studio production board (Phase 5 PM board) — distinct vocabulary from
+    # notes_calendar_tasks above: keyed on "board" plus a status word/verb, or
+    # a status word plus a question/action verb, so it doesn't fire on plain
+    # English uses of "board" ("the board of directors") or "done"/"doing" in
+    # unrelated sentences. Covers: "add X to the board", "what's on the
+    # board", "move X to done", "what's in doing", "mark X as done".
+    if has(
+        r"\b(production board|task board|kanban(?:\s+board)?|pm board)\b",
+        r"\b(?:what'?s|show|show me|open|check)\b.{0,20}\b(?:on|in)\s+(?:the\s+)?board\b",
+        r"\bwhat'?s\s+in\s+(?:todo|to-do|doing|done)\b",
+        r"\badd\b.{0,40}\bto\s+(?:the\s+)?board\b",
+        r"\bput\b.{0,40}\bon\s+(?:the\s+)?board\b",
+        r"\bmove\b.{0,60}\bto\s+(?:todo|to-do|doing|done)\b",
+        r"\bmark\b.{0,40}\bas\s+(?:todo|to-do|doing|done|in progress|complete|completed)\b",
+        r"\bboard\b.{0,20}\b(?:todo|to-do|doing|done)\b",
+    ):
+        domains.add("board")
     _code_write_intent = has(
         r"\b(?:python|javascript|typescript|java|c\+\+|cpp|c#|csharp|rust|go|golang|"
         r"ruby|php|swift|kotlin|bash|shell|html|css|sql)\b",

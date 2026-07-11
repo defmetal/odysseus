@@ -23,6 +23,9 @@ from src.tools.cookbook import (  # noqa: F401
 from src.tools.search import do_search_chats  # noqa: F401
 from src.tools.notes import do_manage_notes  # noqa: F401
 from src.tools.calendar import do_manage_calendar  # noqa: F401
+from src.tools.board import (  # noqa: F401
+    do_task_add, do_task_move, do_task_list, do_task_update,
+)
 from src.tools.image import (  # noqa: F401
     do_edit_image,
     do_restyle_image, do_inpaint_region, do_controlnet,  # studio image-edit tools

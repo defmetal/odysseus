@@ -1659,6 +1659,30 @@ class Note(TimestampMixin, Base):
     agent_session_id  = Column(String, nullable=True)
 
 
+class StudioTask(TimestampMixin, Base):
+    """A task on the animation-studio production board (PM board MVP, Phase 5
+    of CHARACTER-PIPELINE-DECISION.md). Chat-driven via the task_add/task_move/
+    task_list/task_update agent tools (src/tools/board.py).
+
+    SHARED across all users — unlike Note/GalleryImage this is deliberately
+    NOT owner-scoped: both accounts (admin + wife) see and edit the same
+    board. `created_by` is provenance only (who added the row) and must
+    never be used as a visibility filter.
+    """
+    __tablename__ = "studio_tasks"
+
+    id         = Column(String, primary_key=True, index=True)
+    title      = Column(String, nullable=False)
+    status     = Column(String, nullable=False, default="todo")  # "todo" | "doing" | "done"
+    assignee   = Column(String, nullable=True)
+    tags       = Column(String, nullable=True, default="")   # comma-separated, matches GalleryImage.tags convention
+    created_by = Column(String, nullable=True, index=True)   # username; provenance only — NOT a visibility filter
+
+    __table_args__ = (
+        Index('ix_studio_tasks_status_created', 'status', 'created_at'),
+    )
+
+
 class CalendarCal(TimestampMixin, Base):
     """A calendar (e.g. 'Personal', 'TimeTree')."""
     __tablename__ = "calendars"

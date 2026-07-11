@@ -24,7 +24,7 @@ import inspect
 
 import src.tool_implementations as ti
 
-# 33 do_* tool functions
+# 37 do_* tool functions
 _EXPECTED = [
     "do_adopt_served_model", "do_api_call", "do_app_api", "do_cancel_download",
     "do_download_model", "do_edit_image", "do_list_cached_models",
@@ -35,7 +35,8 @@ _EXPECTED = [
     "do_manage_tasks", "do_manage_tokens", "do_manage_webhooks",
     "do_resolve_contact", "do_search_chats", "do_search_hf_models",
     "do_serve_model", "do_serve_preset", "do_stop_served_model",
-    "do_tail_serve_output", "do_trigger_research", "do_vault_get",
+    "do_tail_serve_output", "do_task_add", "do_task_list", "do_task_move",
+    "do_task_update", "do_trigger_research", "do_vault_get",
     "do_vault_search", "do_vault_unlock",
     # module-private helpers (importable by name too)
     "_cookbook_apply_retry_suggestion", "_cookbook_env_for_host",
@@ -81,6 +82,7 @@ _DOMAIN_MODULES = (
     "src.tools.research",
     "src.tools.contacts",
     "src.tools.vault",
+    "src.tools.board",  # studio production-board MVP (Phase 5), new domain
     "src.agent_tools.admin_tools",  # admin manage_* tools migrated here (#3629)
 )
 

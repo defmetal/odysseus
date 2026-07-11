@@ -649,6 +649,7 @@ async def _execute_tool_block_impl(
         do_manage_contact,
         do_vault_search, do_vault_get, do_vault_unlock,
         do_app_api,
+        do_task_add, do_task_move, do_task_list, do_task_update,
     )
 
     # HACK:
@@ -834,6 +835,18 @@ async def _execute_tool_block_impl(
     elif tool == "manage_calendar":
         desc = "manage_calendar"
         result = await do_manage_calendar(content, owner=owner)
+    elif tool == "task_add":
+        desc = "task_add"
+        result = await do_task_add(content, owner=owner)
+    elif tool == "task_move":
+        desc = "task_move"
+        result = await do_task_move(content, owner=owner)
+    elif tool == "task_list":
+        desc = "task_list"
+        result = await do_task_list(content, owner=owner)
+    elif tool == "task_update":
+        desc = "task_update"
+        result = await do_task_update(content, owner=owner)
     elif tool == "download_model":
         desc = "download_model"
         result = await do_download_model(content, owner=owner)

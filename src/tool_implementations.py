@@ -62,6 +62,11 @@ from src.tools.search import do_search_chats  # noqa: F401
 from src.tools.notes import do_manage_notes  # noqa: F401
 # Calendar domain extracted to src/tools/calendar.py (slice 1, #4082/#4071).
 from src.tools.calendar import do_manage_calendar  # noqa: F401
+# Board (studio production board, PM MVP Phase 5) — new domain, added
+# directly under src/tools/ (not part of the original slice-1 split).
+from src.tools.board import (  # noqa: F401
+    do_task_add, do_task_move, do_task_list, do_task_update,
+)
 # Image domain extracted to src/tools/image.py (slice 1, #4082/#4071).
 from src.tools.image import (  # noqa: F401
     do_edit_image,
