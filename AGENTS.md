@@ -11,7 +11,9 @@ one(s) relevant to your task** (don't load them all every time):
 | Doc | Read it when… |
 |---|---|
 | `data/studio/ARCHITECTURE.md` | working on image gen/edit/training — the stack, components, data flow, what we built, the VRAM budget |
-| `data/studio/PROPOSAL-CHARACTER-CONSISTENCY.md` | **why consistency fails + the fix plan** (2026-07-09) — missing multi-LoRA serve path, color-sheet-first chars, phases to usable; share this with any new AI |
+| `data/studio/CHARACTER-PIPELINE-DECISION.md` | **THE reconciled character plan (2026-07-09) — READ THIS FIRST for character work.** Merges Hermes + Fable: Fable's QIE-2511 dataset-factory backbone + adapter-interference fix + Hermes's acceptance gate; rejects the ControlNet-2.1 swap. Supersedes the two proposals below for execution |
+| `data/studio/PROPOSAL-CHARACTER-CONSISTENCY.md` | Hermes's proposal (reasoning/guardrail record) — why consistency fails, acceptance gate, "what not to do." Superseded for execution by CHARACTER-PIPELINE-DECISION.md |
+| `data/studio/CHARACTER-PIPELINE-PLAN.md` | Fable/Cowork's proposal (citation record, ~18 sources) — QIE-2511 factory, adapter-interference mechanism, deep audit. Superseded for execution by CHARACTER-PIPELINE-DECISION.md |
 | `data/studio/ODYSSEUS.md` | working on the platform — Docker/GPU/Ollama/auth/LAN config, the agent/tool/skill system, the codebase patches, the big gotchas |
 | `data/studio/TRAINING-GUIDE.md` | curating datasets / training LoRAs — faces, hair, backdrops, character LoRAs, outfit-changeable characters, caption discipline |
 | `data/studio/OPERATIONS.md` | running it day-to-day — generate, reboot, serve, sync the repo, troubleshoot |
