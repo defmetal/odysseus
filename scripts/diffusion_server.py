@@ -52,30 +52,93 @@ _args = None
 # trigger so callers never type the exact trigger. Loaded from --style-config.
 _apply_style = None
 
-# Style variant: with FP8 the style LoRA is fused into the weights at load, so a
-# single loaded pipeline is permanently either "styled" (LoRA + auto-trigger) or
-# "general" (plain base, no LoRA, no trigger). They can't coexist in one copy, so
-# we expose them as two model ids ("Z-Image" / "Z-Image-General") and swap-load on
-# demand. _variant = what's loaded now; _target_variant = what the next load_model()
-# should build. "general" is only offered when a --lora is actually configured.
-_variant = None          # "styled" | "general" | None (unloaded)
+# Optional character registry: maps a user-typed character trigger (e.g.
+# "tetsuya_oc") found in the prompt to a character LoRA that gets stacked on
+# top of the style LoRA and fused+quantized together at load (the "char:
+# <trigger>" variant below). Loaded from --characters-config; the pure-Python
+# registry load + prompt-scan logic lives in data/studio/scripts/characters.py
+# (no torch import, so it's unit-testable standalone -- see
+# test_characters_registry.py).
+_characters_registry = {}   # trigger -> {name, lora, weight, enabled}
+_detect_character = None    # characters.detect_character, once loaded
+
+# Style/character variant: with FP8 the LoRA(s) are fused into the weights at
+# load, so a single loaded pipeline is permanently one of:
+#   "styled"         -- base + style LoRA + auto-trigger (the default)
+#   "general"        -- plain base, no LoRA, no trigger
+#   "char:<trigger>" -- base + style LoRA + the named character LoRA, fused
+#                       together (see load_model()'s _char_trigger handling)
+# They can't coexist in one loaded copy, so all variants share the ONE
+# "Z-Image" model id and swap-load on demand -- character selection is by
+# PROMPT CONTENT (see _resolve_variant), not a separate model id, unlike the
+# styled/general split which IS a model id. _variant = what's loaded now;
+# _target_variant = what the next load_model() should build. "general" is
+# only offered when a --lora is actually configured.
+_variant = None          # "styled" | "general" | "char:<trigger>" | None (unloaded)
 _target_variant = "styled"
 _GENERAL_SUFFIX = "-General"
+# Recipe snapshot for /admin/status, written at the end of load_model(): empty
+# ({}) for styled/general, or {"character", "char_weight", "style_weight"}
+# when a character variant is loaded. Kept separate from `_variant` (which
+# only encodes "char:<trigger>") so status can report the full recipe without
+# a second registry lookup. Always cleared alongside _pipe/_variant (see
+# _unload_model() and load_model()'s failure rollback) so it's never stale
+# when loaded=false.
+_loaded_recipe = {}
 
 
 def _resolve_variant(req) -> str:
-    """Map an incoming request's model id to a variant. Anything containing
-    'general' (e.g. 'Z-Image-General') -> general; otherwise styled. Requests
-    with no model field (some img2img/inpaint callers) default to styled."""
+    """Map an incoming request to a variant. Anything containing 'general' in
+    the model id (e.g. 'Z-Image-General') -> general (character detection is
+    skipped: general never gets the style or character LoRAs). Otherwise, scan
+    the request's RAW prompt -- this runs in the _with_model wrapper BEFORE the
+    route body applies the style auto-trigger, so character triggers are
+    matched against exactly what the caller typed -- for a registered, enabled
+    character trigger; if found -> "char:<trigger>". If more than one
+    registered trigger appears, the FIRST one occurring in the prompt wins and
+    a warning is logged (two-character scenes are a later phase -- see
+    CHARACTER-PIPELINE-DECISION.md). Otherwise -> styled. Requests with no
+    model field (some img2img/inpaint callers) go through this same
+    char-or-styled logic."""
     mid = (getattr(req, "model", "") or "").lower()
     if _args is not None and getattr(_args, "lora", "") and "general" in mid:
         return "general"
+
+    if _detect_character is not None and _characters_registry:
+        prompt = getattr(req, "prompt", "") or ""
+        winner, matched = _detect_character(prompt, _characters_registry)
+        if len(matched) > 1:
+            others = ", ".join(t for t in matched if t != winner)
+            logger.warning(
+                f"Multiple character triggers in prompt -- using first-occurring "
+                f"'{winner}' (also present: {others}); two-character scenes are "
+                "not yet supported"
+            )
+        if winner:
+            return f"char:{winner}"
+
     return "styled"
 
 # Idle-unload: release GPU VRAM after a stretch with no image requests so another
 # GPU process (e.g. an Ollama LLM) can use the card; the model auto-reloads on the
 # next request. _load_lock guards all _pipe / _active state transitions.
 _load_lock = threading.RLock()
+# Serializes actual pipe() calls (the denoise loop) across every image
+# endpoint -- generations/edits/inpaint/harmonize all funnel through
+# _with_model, so acquiring this once there covers all of them. This is the
+# fix for concurrent-request scheduler-state corruption (two threads driving
+# FlowMatchEulerDiscreteScheduler.step()/set_timesteps() on the SAME shared
+# scheduler object -> IndexError deep in step()): the route functions below
+# are plain `def` (not `async def`), so FastAPI/Starlette runs them via
+# run_in_threadpool -- REAL OS threads, not coroutines on the event loop --
+# which is why a threading primitive (not asyncio.Lock, which only
+# coordinates coroutines on one event loop thread) is the correct tool here.
+# RLock, not Lock: generate_image() delegates its img2img branch to
+# img2img_edit() via a direct same-thread call, and img2img_edit is ALSO
+# _with_model-wrapped, so the same thread re-enters this lock one level
+# deeper -- a plain Lock would self-deadlock there. It also matches physical
+# reality: one 32GB GPU can only run one denoise at a time regardless.
+_generation_lock = threading.RLock()
 _last_activity = time.time()
 _active = 0
 _idle_unload_seconds = 0  # 0 disables idle-unload; set from --idle-unload-seconds
@@ -98,9 +161,39 @@ def _load_style_config(path: str):
         logger.warning(f"Could not load style config {path}: {e}")
 
 
+def _load_characters_config(path: str):
+    """Load the character registry (trigger -> LoRA entry) from a
+    characters.json at the given path, via the pure-Python characters.py
+    module beside it (mirrors _load_style_config's styles.py loading).
+    Tolerant of a missing file, malformed JSON, or malformed entries -- logs a
+    warning and leaves the registry empty, i.e. serves with characters
+    disabled (styled/general only); never raises."""
+    global _characters_registry, _detect_character
+    if not path:
+        return
+    try:
+        from pathlib import Path as _P
+        d = str(_P(path).resolve().parent)
+        if d not in sys.path:
+            sys.path.insert(0, d)
+        from characters import load_registry, detect_character
+        _characters_registry = load_registry(path)
+        _detect_character = detect_character
+        n_enabled = sum(1 for v in _characters_registry.values() if v.get("enabled"))
+        logger.info(f"Character registry loaded from {path}: "
+                    f"{len(_characters_registry)} character(s), {n_enabled} enabled")
+    except Exception as e:
+        logger.warning(f"Could not load character registry {path}: {e} -- serving without characters")
+        _characters_registry = {}
+        _detect_character = None
+
+
 def _styled(prompt: str) -> str:
     """Apply the style trigger if configured; otherwise return prompt unchanged.
-    In the 'general' variant the LoRA is not loaded, so skip the trigger too."""
+    In the 'general' variant the LoRA is not loaded, so skip the trigger too.
+    Char variants ("char:<trigger>") DO get the style trigger applied -- the
+    production setup always stacks the style LoRA under a character (see
+    load_model())."""
     if _variant == "general":
         return prompt
     try:
@@ -213,9 +306,72 @@ def _fix_meta_tensors(pipe, dtype):
 
 
 def load_model():
-    global _pipe, _model_id, _variant
+    """Public entry point: run _load_model_impl() and GUARANTEE consistent
+    bookkeeping no matter how it exits.
+
+    _load_model_impl() runs for real wall-clock seconds-to-minutes (download/
+    load weights, fuse LoRAs, FP8-quantize) and only sets `_variant` on its
+    very last line -- but it sets the global `_pipe` to a real object much
+    earlier (as soon as from_pretrained() succeeds), long before `_variant`
+    is touched. If anything raises in between (a client disconnecting does
+    NOT itself cancel this thread -- there's no cooperative cancellation for
+    a synchronous call already running in a worker thread -- but a real load
+    failure, e.g. a bad meta-tensor fixup or an OOM, can still happen at any
+    point), the module was previously left with _pipe set (loaded=true) but
+    _variant still None from the prior _unload_model() -- the exact
+    `loaded:true, variant:null` /admin/status inconsistency reported in the
+    bug ticket. The try/finally below guarantees one of two outcomes: the
+    load fully completed (_loaded_ok=True, _variant is whatever
+    _load_model_impl() decided), or it did not, in which case we force a
+    full, self-consistent rollback (mirrors _unload_model()'s cleanup) and
+    log a warning -- never a half-updated in-between state. The original
+    exception still propagates (finally doesn't swallow it), so callers
+    (the HTTP request, or admin_load()) still see the failure.
+    """
+    global _pipe, _inpaint_pipe, _img2img_pipe, _variant, _loaded_recipe
+    _loaded_ok = False
+    try:
+        _load_model_impl()
+        _loaded_ok = True
+    finally:
+        if not _loaded_ok:
+            logger.warning(
+                "load_model() did not complete -- rolling back to a clean "
+                f"unloaded state (was: pipe={'set' if _pipe is not None else 'None'}, "
+                f"variant={_variant!r})"
+            )
+            _pipe = None
+            _inpaint_pipe = None
+            _img2img_pipe = None
+            _variant = None
+            _loaded_recipe = {}
+            try:
+                gc.collect()
+                torch.cuda.empty_cache()
+            except Exception as e:
+                logger.debug(f"cleanup after failed load_model() failed: {e}")
+
+
+def _load_model_impl():
+    global _pipe, _model_id, _variant, _loaded_recipe
     import diffusers
-    _use_lora = bool(_args.lora) and _target_variant == "styled"
+
+    # Character variant? _target_variant is "char:<trigger>" when the last
+    # resolved request matched a registered, enabled trigger (_resolve_variant).
+    # Char variants ALWAYS stack the style LoRA too (the production char+style
+    # setup, test_char_style.py / spike_dual_adapter.py Test C) -- "general"
+    # never gets either; plain "styled" gets style only.
+    _char_trigger = (
+        _target_variant.split(":", 1)[1]
+        if isinstance(_target_variant, str) and _target_variant.startswith("char:")
+        else None
+    )
+    _char_entry = _characters_registry.get(_char_trigger) if _char_trigger else None
+    _char_loaded_ok = False
+    if _char_trigger and _char_entry is None:
+        logger.warning(f"Requested character variant 'char:{_char_trigger}' has no "
+                        f"registry entry -- falling back to styled")
+    _use_lora = bool(_args.lora) and _target_variant != "general"
 
     model_path = _args.model
     _model_id = Path(model_path).name
@@ -513,7 +669,21 @@ def load_model():
     logger.info(f"Model loaded: {_model_id}")
 
     # Load LoRA weights if specified (skipped for the 'general' variant, which
-    # serves the plain base with no style).
+    # serves the plain base with no style). Char variants additionally stack a
+    # character LoRA on top at its own registry weight, loaded + activated
+    # alongside the style adapter(s) below in ONE set_adapters() call -- the
+    # production char+style setup (test_char_style.py's known-good bf16
+    # pattern; spike Test C confirmed the fuse-then-quantize path works for
+    # FP8, see data/studio/spike_dual_adapter/results.md).
+    _adapter_names = []
+    _adapter_weights = []
+    # Style adapter weight: normally the CLI's global --lora-scale, but a
+    # character variant overrides it with that character's registry
+    # 'style_weight' (default 1.0) -- e.g. tetsuya_oc dials the style LoRA
+    # down to 0.75 so it stops overpowering full-body masculinity (see
+    # characters.json's _comment). Plain styled/general variants have no
+    # _char_entry, so they keep using _args.lora_scale unchanged.
+    _style_weight = _char_entry.get("style_weight", 1.0) if _char_entry else _args.lora_scale
     if _use_lora:
         for lora_path in _args.lora.split(','):
             lora_path = lora_path.strip()
@@ -522,26 +692,45 @@ def load_model():
             try:
                 lora_name = Path(lora_path).stem
                 _pipe.load_lora_weights(lora_path, adapter_name=lora_name)
-                logger.info(f"Loaded LoRA: {lora_name} from {lora_path}")
+                _adapter_names.append(lora_name)
+                _adapter_weights.append(_style_weight)
+                logger.info(f"Loaded LoRA: {lora_name} from {lora_path} weight={_style_weight}")
             except Exception as e:
                 logger.warning(f"Failed to load LoRA {lora_path}: {e}")
-        # Set LoRA scale
+    if _char_entry:
         try:
-            _pipe.set_adapters([Path(p.strip()).stem for p in _args.lora.split(',') if p.strip()],
-                              adapter_weights=[_args.lora_scale] * len([p for p in _args.lora.split(',') if p.strip()]))
-            logger.info(f"LoRA scale set to {_args.lora_scale}")
+            _pipe.load_lora_weights(_char_entry["lora"], adapter_name=_char_trigger)
+            _adapter_names.append(_char_trigger)
+            _adapter_weights.append(_char_entry["weight"])
+            _char_loaded_ok = True
+            logger.info(f"Loaded character LoRA: {_char_entry['name']} ({_char_trigger}) "
+                        f"from {_char_entry['lora']} weight={_char_entry['weight']}")
+        except Exception as e:
+            logger.warning(f"Failed to load character LoRA '{_char_trigger}' from "
+                           f"{_char_entry['lora']}: {e} -- serving styled (style LoRA only)")
+    if _adapter_names:
+        try:
+            _pipe.set_adapters(_adapter_names, adapter_weights=_adapter_weights)
+            logger.info(f"Adapters set: {dict(zip(_adapter_names, _adapter_weights))}")
         except Exception as e:
             logger.debug(f"Could not set adapter weights: {e}")
 
     # Optional FP8 weight-only quantization (after LoRA so adapters can be
     # fused into the weights first — PEFT injection onto already-quantized
-    # linears is unreliable). Roughly halves VRAM at minor quality cost.
+    # linears is unreliable: peft 0.19.1 + torchao 0.17.0 can't inject a LoRA
+    # onto an already-quantized Linear, see
+    # data/studio/spike_dual_adapter/results.md Test B). Roughly halves VRAM
+    # at minor quality cost. When a character adapter is present, this single
+    # fuse_lora() call fuses BOTH the style and character adapters together
+    # before quantizing (spike Test C, ~124s total) -- a per-character
+    # swap-load, the same cost class as the existing Z-Image <->
+    # Z-Image-General swap.
     if getattr(_args, "quantize_fp8", False):
         try:
-            if _use_lora:
+            if _adapter_names:
                 _pipe.fuse_lora()
                 _pipe.unload_lora_weights()
-                logger.info("Fused LoRA into base weights before quantization")
+                logger.info(f"Fused adapter(s) {_adapter_names} into base weights before quantization")
             try:
                 from torchao.quantization import quantize_, Float8WeightOnlyConfig
                 _qcfg = Float8WeightOnlyConfig()
@@ -566,7 +755,23 @@ def load_model():
             logger.warning(f"FP8 quantization failed (serving unquantized): {e}")
 
     _variant = _target_variant
-    logger.info(f"Variant loaded: {_variant} (style LoRA {'on' if _use_lora else 'off'})")
+    if _char_trigger and not _char_loaded_ok:
+        # Requested character failed to attach (bad path / registry race) --
+        # degrade to styled rather than report a character that isn't there.
+        _variant = "styled"
+    _char_log = (
+        f", character '{_char_trigger}' (char weight={_char_entry['weight']}, "
+        f"style_weight={_style_weight})"
+        if (_char_trigger and _char_loaded_ok) else ""
+    )
+    # /admin/status recipe snapshot (see _loaded_recipe's module-level
+    # comment) -- empty for styled/general, populated only when a character
+    # variant actually attached (mirrors the _char_log condition above).
+    _loaded_recipe = (
+        {"character": _char_trigger, "char_weight": _char_entry["weight"], "style_weight": _style_weight}
+        if (_char_trigger and _char_loaded_ok) else {}
+    )
+    logger.info(f"Variant loaded: {_variant} (style LoRA {'on' if _use_lora else 'off'}{_char_log})")
 
 
 def _touch():
@@ -579,7 +784,7 @@ def _unload_model():
     (e.g. an Ollama LLM) can use it. Caller must hold _load_lock. The model
     reloads automatically on the next request. The process stays alive holding
     only the small CUDA context (~0.5GB), so ~all of the model VRAM is freed."""
-    global _pipe, _inpaint_pipe, _img2img_pipe, _variant
+    global _pipe, _inpaint_pipe, _img2img_pipe, _variant, _loaded_recipe
     if _pipe is None:
         return
     logger.info("Idle-unload: releasing GPU VRAM (reloads on next request)")
@@ -587,6 +792,7 @@ def _unload_model():
     _inpaint_pipe = None
     _img2img_pipe = None
     _variant = None
+    _loaded_recipe = {}
     gc.collect()
     try:
         torch.cuda.empty_cache()
@@ -595,6 +801,48 @@ def _unload_model():
     except Exception as e:
         logger.debug(f"empty_cache after unload failed: {e}")
     logger.info("Idle-unload: VRAM released")
+
+
+def _reset_scheduler_state():
+    """Rebuild the scheduler from its own config immediately before a
+    generation call, so no leftover sigmas/timesteps/step_index from a prior
+    (or prior-interrupted) call can carry into this one.
+
+    diffusers pipelines mutate the scheduler object IN PLACE
+    (set_timesteps() rewrites self.sigmas/self.timesteps and resets
+    self._step_index/self._begin_index; step() advances _step_index and
+    indexes into self.sigmas). _pipe, _img2img_pipe and _inpaint_pipe are
+    built from the SAME shared components (_get_inpaint_pipe/
+    _ensure_img2img_pipe construct them with `scheduler=_pipe.scheduler` or
+    via from_pipe(), which shares rather than copies) -- so *_pipe.scheduler
+    is literally one shared object across every endpoint. Two overlapping
+    calls against it is exactly the reported bug: index 31 out of bounds for
+    dimension 0 with size 31 in FlowMatchEulerDiscreteScheduler.step(), i.e.
+    sigmas sized for one request's step count while _step_index was advanced
+    by another's. _generation_lock (see _with_model) now prevents the
+    concurrent case; this rebuild is the belt-and-suspenders half of the
+    fix -- from_config() is diffusers' own documented way to get a scheduler
+    instance with no residual state, confirmed against the installed 0.38
+    scheduling_flow_match_euler_discrete.py (ConfigMixin.from_config, cheap:
+    config is a handful of scalars, no tensors). Resetting on all THREE
+    cached pipe objects (whichever currently exist) keeps them aliased to
+    the same fresh instance, preserving the existing sharing design; any
+    pipe lazily built later in this same call picks up the fresh one too
+    since it's built from _pipe's (already-reset) components.
+    """
+    global _pipe, _img2img_pipe, _inpaint_pipe
+    if _pipe is None:
+        return
+    try:
+        fresh = type(_pipe.scheduler).from_config(_pipe.scheduler.config)
+    except Exception as e:
+        logger.warning(f"Could not rebuild scheduler from config (serving with existing scheduler state): {e}")
+        return
+    _pipe.scheduler = fresh
+    if _img2img_pipe is not None:
+        _img2img_pipe.scheduler = fresh
+    if _inpaint_pipe is not None:
+        _inpaint_pipe.scheduler = fresh
 
 
 def _idle_monitor():
@@ -618,7 +866,20 @@ def _with_model(fn):
     """Route wrapper for the GPU endpoints: reload the model if it was
     idle-unloaded, count the in-flight request so the monitor won't unload
     mid-generation, and reset the idle clock. functools.wraps preserves the
-    original (typed) signature so FastAPI still parses the request body."""
+    original (typed) signature so FastAPI still parses the request body.
+
+    _generation_lock is held for the WHOLE wrapper body, not just the fn()
+    call: a variant swap (_unload_model() + load_model()) touches the exact
+    same shared GPU/pipe state a live generation does, so a swap for one
+    request must not be able to interleave with another request's in-flight
+    denoise either -- only serializing fn() would still let a second
+    request's swap-check (which only needs the separate, briefly-held
+    _load_lock) unload the pipe out from under a first request that's
+    already past its own swap-check and generating. Making _generation_lock
+    reentrant (RLock) is required because generate_image()'s img2img branch
+    calls the also-_with_model-wrapped img2img_edit() directly, same thread,
+    one level deeper.
+    """
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         global _active, _target_variant
@@ -627,21 +888,27 @@ def _with_model(fn):
         # share one loaded copy — this costs a reload, like the LLM GPU swap).
         req = args[0] if args else next(iter(kwargs.values()), None)
         want = _resolve_variant(req)
-        with _load_lock:
-            if _pipe is not None and _variant != want:
-                logger.info(f"Variant swap: {_variant} -> {want} (reloading)")
-                _unload_model()
-            if _pipe is None:
-                _target_variant = want
-                load_model()
-            _active += 1
-            _touch()
-        try:
-            return fn(*args, **kwargs)
-        finally:
+        with _generation_lock:
             with _load_lock:
-                _active -= 1
-            _touch()
+                if _pipe is not None and _variant != want:
+                    logger.info(f"Variant swap: {_variant} -> {want} (reloading)")
+                    _unload_model()
+                if _pipe is None:
+                    _target_variant = want
+                    load_model()
+                _active += 1
+                _touch()
+            try:
+                # Fresh scheduler state for this call -- see
+                # _reset_scheduler_state's docstring for why this matters even
+                # with _generation_lock serializing calls (belt-and-suspenders
+                # against the reported scheduler IndexError).
+                _reset_scheduler_state()
+                return fn(*args, **kwargs)
+            finally:
+                with _load_lock:
+                    _active -= 1
+                _touch()
     return wrapper
 
 
@@ -1460,13 +1727,21 @@ def admin_load():
 
 @app.get("/admin/status")
 def admin_status():
-    return {
+    status = {
         "loaded": _pipe is not None,
         "model": _model_id,
+        "variant": _variant,
         "active_requests": _active,
         "idle_seconds": round(time.time() - _last_activity, 1),
         "idle_unload_seconds": _idle_unload_seconds,
     }
+    # Surface the loaded recipe (character/char_weight/style_weight) when a
+    # character variant is active; _loaded_recipe is {} for styled/general
+    # and is kept in lockstep with _pipe/_variant (set at the end of
+    # _load_model_impl(), cleared by _unload_model() and load_model()'s
+    # failure rollback), so this never reports stale data when loaded=false.
+    status.update(_loaded_recipe)
+    return status
 
 
 @app.get("/health")
@@ -1486,6 +1761,7 @@ if __name__ == "__main__":
     parser.add_argument("--steps", type=int, default=0, help="Default inference steps (0=auto)")
     parser.add_argument("--guidance", type=float, default=3.5, help="Guidance scale (CFG). Use 1.0 for guidance-distilled models like Z-Image-Turbo.")
     parser.add_argument("--style-config", default="", help="Path to a styles.json (with styles.py beside it) to auto-apply a LoRA trigger to incoming prompts.")
+    parser.add_argument("--characters-config", default="", help="Path to a characters.json (with characters.py beside it) registering character LoRA triggers; a prompt containing a registered trigger swap-loads a fused style+character variant.")
     parser.add_argument("--quantize-fp8", action="store_true", help="FP8 weight-only quantization of transformer + text encoder (fuses any LoRA first). Requires torchao.")
     parser.add_argument("--width", type=int, default=1024, help="Default output width")
     parser.add_argument("--height", type=int, default=1024, help="Default output height")
@@ -1508,6 +1784,7 @@ if __name__ == "__main__":
     _idle_unload_seconds = _args.idle_unload_seconds
 
     _load_style_config(_args.style_config)
+    _load_characters_config(_args.characters_config)
 
     # Replace the module-load middleware stack with the CLI-configured one so
     # operator-supplied --allowed-host / --allowed-origin values take effect
