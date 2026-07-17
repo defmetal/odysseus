@@ -71,6 +71,7 @@ from src.tools.board import (  # noqa: F401
 from src.tools.image import (  # noqa: F401
     do_edit_image,
     do_restyle_image, do_inpaint_region, do_controlnet,  # studio image-edit tools
+    do_fix_faces, do_reference_edit,  # face-drift fix + QIE dataset-factory chat access
 )
 # Research domain extracted to src/tools/research.py (slice 1, #4082/#4071).
 from src.tools.research import do_manage_research, do_trigger_research  # noqa: F401

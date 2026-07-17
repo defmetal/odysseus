@@ -645,6 +645,7 @@ async def _execute_tool_block_impl(
         do_list_serve_presets, do_serve_preset, do_adopt_served_model,
         do_list_cookbook_servers,
         do_edit_image, do_restyle_image, do_inpaint_region, do_controlnet,
+        do_fix_faces, do_reference_edit,
         do_trigger_research, do_manage_research, do_resolve_contact,
         do_manage_contact,
         do_vault_search, do_vault_get, do_vault_unlock,
@@ -901,6 +902,12 @@ async def _execute_tool_block_impl(
     elif tool == "controlnet":
         desc = "controlnet"
         result = await do_controlnet(content, owner=owner)
+    elif tool == "fix_faces":
+        desc = "fix_faces"
+        result = await do_fix_faces(content, owner=owner)
+    elif tool == "reference_edit":
+        desc = "reference_edit"
+        result = await do_reference_edit(content, owner=owner)
     elif tool == "edit_file":
         result = await _direct_fallback(tool, content) or {"error": "edit failed", "exit_code": 1}
         desc = result.get("output") or result.get("error") or "edit_file"

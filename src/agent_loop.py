@@ -264,6 +264,8 @@ _DOMAIN_RULES = {
 ## Image rules
 - For image generation requests, use `generate_image` with the user's description as the prompt; pass an explicit size only when the user gives one.
 - To restyle an UPLOADED image into the trained style, use `restyle_image` (one prompt line). To fix ONE part of an uploaded image, use `inpaint_region` (region line + prompt line). These tools find the uploaded image, the file path, and the database themselves — NEVER run shell commands, search for files, or touch any database to do image editing; just call the tool once and report its result.
+- To fix face drift on an UPLOADED image (the face looks off-model/wrong in a wider shot), use `fix_faces` instead of a generic `inpaint_region` call — it's tuned specifically for a close-up face redraw (optional character-trigger line + optional expression/detail hint line, both may be omitted).
+- For a one-off dataset-factory edit of an UPLOADED image (colorize line art against a character's color reference, vary the pose/scene, or build a multi-view character turnaround sheet), use `reference_edit` (mode line: colorize/vary/turnaround, then an optional prompt line and an optional `ref: <character>` line). This runs a SEPARATE, heavier model (Qwen-Image-Edit-2511) from the Z-Image house style — never add a style trigger for it. It handles ONE uploaded image per call; batch runs are CLI-only, do not promise bulk processing.
 - For gallery-image edits (upscale, remove background), use `edit_image`.""",
     "web": """\
 ## Web rules
@@ -331,7 +333,8 @@ _DOMAIN_RULES = {
 }
 
 _DOMAIN_TOOL_MAP = {
-    "images": {"generate_image", "edit_image", "restyle_image", "inpaint_region", "controlnet"},
+    "images": {"generate_image", "edit_image", "restyle_image", "inpaint_region", "controlnet",
+               "fix_faces", "reference_edit"},
     "web": set(WEB_TOOL_NAMES),
     "documents": {"create_document", "edit_document", "update_document", "suggest_document", "manage_documents"},
     "email": {"list_email_accounts", "list_emails", "read_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact"},
@@ -489,6 +492,21 @@ Fix ONE part of the user's most recently UPLOADED image (inpaint). Use when they
 <canny|scribble>
 ```
 Turn the user's most recently UPLOADED sketch or reference into a finished on-model frame whose COMPOSITION follows it (ControlNet). Use when they attach a sketch/storyboard/pose/layout and say "turn this sketch into a frame", "make this on-model", "use this composition/pose". Line 1 = describe the scene in plain words — do NOT add a style trigger, it's automatic. Optional line 2 = 'canny' (default; follows a reference's edges) or 'scribble' (loose hand-drawn line-art). The tool finds the image itself — do NOT look for files or run shell commands. Heavier mode (~2 min; pauses normal image gen). Result lands in the Gallery.""",
+
+    "fix_faces": """\
+```fix_faces
+<character trigger: optional, e.g. tetsuya_oc>
+<expression/detail hint: optional>
+```
+Fix face drift on the user's most recently UPLOADED image (a close-up inpaint of just the face) — use when they attach an image and say "fix her face", "fix the face(s)", "the face looks off/wrong", "redraw his face". Both lines are optional and the body may be left EMPTY (a plain redraw of the face, no character/hint). Line 1 = a character trigger ONLY if the user named a specific trained character (e.g. `tetsuya_oc`) — leave it out otherwise, do not invent one. Line 2 = an optional expression or detail hint (e.g. "smiling", "surprised, blush"). Do NOT add a style trigger yourself — it's automatic. The tool locates the face itself — do NOT look for files, paths, masks, or run shell commands. v1 fixes the single largest/most prominent face only (not every face in a group shot). Result lands in the Gallery.""",
+
+    "reference_edit": """\
+```reference_edit
+<mode: colorize|vary|turnaround>
+<prompt: optional for colorize/turnaround, REQUIRED for vary>
+ref: <character name, optional>
+```
+One-off dataset-factory edit of the user's most recently UPLOADED image via the Qwen-Image-Edit-2511 model — a SEPARATE, heavier pipeline from the house Z-Image style (no style trigger; never add one). Use when they attach an image and say "colorize this line art", "colorize this against <character>'s colors", "vary the pose but keep her the same", "make a turnaround/character sheet from this". Line 1 = mode: `colorize` (line art -> colored, needs a `ref:` character), `vary` (new pose/expression/scene, prompt REQUIRED), or `turnaround` (multi-view character sheet). Line 2 = the prompt describing the change (optional for colorize/turnaround — sensible defaults apply; REQUIRED for vary, do not omit it). Optional `ref:` line names a trained character (e.g. `tetsuya`) whose canonical color reference image is used alongside the upload — REQUIRED for `colorize`, optional for `vary`, unused for `turnaround`. Handles ONE uploaded image per call — batch runs are CLI-only, do NOT promise bulk/multiple-image processing. Heavier mode (model swap-in; can take several minutes). Result lands in the Gallery.""",
 
     "chat_with_model": "- ```chat_with_model``` — Ask a DIFFERENT AI model and relay its answer. Line 1 = model name (or 'model@endpoint'), rest = your message. Use when the user says 'ask <model>', 'what does <model> think', or wants to compare/their answer from another model.",
     "ask_teacher": "- ```ask_teacher``` — Escalate a hard question to a more capable model. Line 1 = model name or 'auto', rest = the question. Use when stuck or need expert knowledge.",
@@ -1109,12 +1127,21 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     # do NOT grant shell, so a weak model can't improvise file/db commands.
     _img_edit_verb = has(
         r"\b(restyle|inpaint|img2img|redraw|re-?draw|retouch|touch[- ]?up)\b",
-        r"\bfix\b.{0,40}\b(hand|hands|face|eyes?|fingers?|mouth|hair|arms?|legs?|background|expression)\b",
+        r"\bfix\b.{0,40}\b(hand|hands|face|faces|eyes?|fingers?|mouth|hair|arms?|legs?|background|expression)\b",
         r"\b(in (?:my|the toei|toei|the 90s)|my) style\b",
         r"\bedit (?:this|the|my) (?:image|picture|photo|frame|drawing|illustration|art)\b",
         r"\bon.?model\b",
         r"\b(turn|make)\b.{0,25}\b(sketch|storyboard|pose|line ?art|drawing|reference)\b.{0,25}\b(into|frame|on.?model)\b",
         r"\b(use|follow|match)\b.{0,15}\b(this|the|my)\b.{0,8}\b(pose|composition|layout|sketch)\b",
+        # reference_edit vocabulary (QIE dataset-factory tool): colorize is
+        # unambiguous. "turnaround" alone is deliberately EXCLUDED — "what's
+        # the turnaround time on my order" is common unrelated business
+        # phrasing — so it only counts paired with character/sheet wording.
+        r"\bcoloriz(?:e|ing|ed|ation)\b",
+        r"\bcolouris(?:e|ing|ed|ation)\b",
+        r"\bcharacter\s+(?:sheet|turnaround)\b",
+        r"\bturnaround\s+sheet\b",
+        r"\bsheet\b.{0,20}\bturnaround\b",
     )
     # When an image is attached, the DEFAULT intent is to EDIT it (you attached
     # it for a reason) unless the message explicitly asks for a brand-NEW image.

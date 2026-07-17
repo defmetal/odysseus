@@ -1272,16 +1272,18 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
             if not content:
                 # An empty fence is still an unambiguous call for tools that
                 # take no required args — ```list_email_accounts``` (or
-                # ```task_list```) with no body is a shape local models really
-                # emit for no-arg/all-optional-arg tools. Dispatch with empty
-                # args and let the tool's own validation answer; silently
-                # dropping the call left models concluding the feature was
-                # broken (the same failure mode BUILTIN_EMAIL_TOOLS was
-                # fixed for — task_list's "what's on the board" with no
-                # status filter is the identical shape). Other tags (bash,
-                # python, task_add/task_move/task_update which REQUIRE an
-                # arg) keep skipping: empty content is nothing to run.
-                if tag in BUILTIN_EMAIL_TOOLS or tag == "task_list":
+                # ```task_list``` or ```fix_faces```) with no body is a shape
+                # local models really emit for no-arg/all-optional-arg tools.
+                # Dispatch with empty args and let the tool's own validation
+                # answer; silently dropping the call left models concluding
+                # the feature was broken (the same failure mode
+                # BUILTIN_EMAIL_TOOLS was fixed for — task_list's "what's on
+                # the board" with no status filter, and fix_faces' "fix her
+                # face" with no character trigger/hint, are the identical
+                # shape). Other tags (bash, python, task_add/task_move/
+                # task_update/reference_edit which REQUIRE an arg) keep
+                # skipping: empty content is nothing to run.
+                if tag in BUILTIN_EMAIL_TOOLS or tag in ("task_list", "fix_faces"):
                     blocks.append(ToolBlock(tag, ""))
                 continue
             # If a code block's content is an <invoke> XML call (some models wrap

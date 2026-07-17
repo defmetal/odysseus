@@ -86,6 +86,8 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_fi
              # Studio production-board MVP (Phase 5) — chat-driven PM board,
              # distinct from manage_tasks (scheduled/recurring AI jobs).
              "task_add", "task_move", "task_list", "task_update",
+             # Studio face-drift fix + one-off QIE dataset-factory chat access.
+             "fix_faces", "reference_edit",
              "suggest_document",
              "manage_endpoints", "manage_mcp", "manage_webhooks",
              "manage_tokens", "manage_documents", "manage_settings",
