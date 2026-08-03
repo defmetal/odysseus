@@ -119,14 +119,18 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 return [TextContent(type="text", text="Error: No image model found. Configure one in Admin.")]
 
         try:
-            url, model_id, headers = await asyncio.to_thread(_resolve_model, model_spec)
+            url, model_id, headers = await asyncio.to_thread(_resolve_model, model_spec, model_type="image")
         except ValueError:
-            # Agent models sometimes pass invented names (or a size string)
-            # as the model — recover via the first local image endpoint.
-            _fb = _first_local_image_model()
-            if not _fb:
-                return [TextContent(type="text", text=f"Error: No endpoint found with image model '{model_spec}'.")]
-            url, model_id, headers = await asyncio.to_thread(_resolve_model, _fb)
+            _lower_model_spec = model_spec.lower()
+            if any(_name in _lower_model_spec for _name in ("gpt-image", "dall-e")):
+                url, model_id, headers = await asyncio.to_thread(_resolve_model, model_spec)
+            else:
+                # Agent models sometimes pass invented names (or a size string)
+                # as the model -- recover via the first local image endpoint.
+                _fb = _first_local_image_model()
+                if not _fb:
+                    return [TextContent(type="text", text=f"Error: No endpoint found with image model '{model_spec}'.")]
+                url, model_id, headers = await asyncio.to_thread(_resolve_model, _fb)
 
         is_gpt_image = "gpt-image" in model_id.lower()
         base_url = url.replace("/chat/completions", "").replace("/v1/messages", "").rstrip("/")

@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 
 from .subprocess_tools import BashTool, PythonTool
 from .web_tools import WebSearchTool, WebFetchTool
-from .filesystem_tools import ReadFileTool, WriteFileTool, EditFileTool, LsTool, GlobTool, GrepTool, GetWorkspaceTool
+from .filesystem_tools import ReadFileTool, WriteFileTool, EditFileTool, ApplyPatchTool, LsTool, GlobTool, GrepTool, GetWorkspaceTool
+from .coding_tools import TodoWriteTool
 from .document_tools import CreateDocumentTool, UpdateDocumentTool, EditDocumentTool, SuggestDocumentTool, ManageDocumentTool
 from .interaction_tools import AskUserTool, UpdatePlanTool
 from .model_interaction_tools import ChatWithModelTool, AskTeacherTool, ListModelsTool
@@ -41,6 +42,8 @@ TOOL_HANDLERS = {
     "read_file": ReadFileTool().execute,
     "write_file": WriteFileTool().execute,
     "edit_file": EditFileTool().execute,
+    "apply_patch": ApplyPatchTool().execute,
+    "todowrite": TodoWriteTool().execute,
     "ls": LsTool().execute,
     "glob": GlobTool().execute,
     "grep": GrepTool().execute,
@@ -74,6 +77,7 @@ PYTHON_TIMEOUT = 30
 
 # Tool types that trigger execution
 TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_file", "edit_file",
+             "apply_patch", "todowrite",
              "grep", "glob", "ls", "get_workspace", "manage_bg_jobs",
              "create_document", "update_document", "edit_document",
              "search_chats",
@@ -81,13 +85,8 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_fi
              "send_to_session",
              "pipeline",
              "manage_session", "manage_memory", "list_models",
-             "ui_control", "generate_image", "restyle_image", "inpaint_region", "controlnet", "ask_user", "update_plan",
+             "ui_control", "generate_image", "ask_user", "update_plan",
              "manage_tasks", "api_call", "ask_teacher", "manage_skills",
-             # Studio production-board MVP (Phase 5) — chat-driven PM board,
-             # distinct from manage_tasks (scheduled/recurring AI jobs).
-             "task_add", "task_move", "task_list", "task_update",
-             # Studio face-drift fix + one-off QIE dataset-factory chat access.
-             "fix_faces", "reference_edit",
              "suggest_document",
              "manage_endpoints", "manage_mcp", "manage_webhooks",
              "manage_tokens", "manage_documents", "manage_settings",
