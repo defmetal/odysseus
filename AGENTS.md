@@ -1,4 +1,4 @@
-# AGENTS.md — orientation for any Claude/agent working in this repo
+# CLAUDE.md — orientation for any Claude/agent working in this repo
 
 This repo is a self-hosted **Odysseus** AI-workspace install, and on top of it
 Austin (`defmetal@gmail.com`) + his wife are building an **animation studio**:
@@ -27,13 +27,15 @@ one(s) relevant to your task** (don't load them all every time):
 
 Suggested first read for a fresh agent: ARCHITECTURE.md then ODYSSEUS.md.
 
-## The current stack (as of 2026-06-25)
+## The current stack (as of 2026-08-02)
 - **Image model: Z-Image-Base, FP8, served by `scripts/diffusion_server.py` on
-  port 8100** with the Base-native style LoRA `data/studio/training/
-  toei90s_zbase_v2/toei90s_zbase_v2.safetensors`, launched `--guidance 4.5
+  port 8100** with style LoRA `data/studio/training/toei90s_zbase_v4_1/
+  toei90s_zbase_v4_1.safetensors` PLUS `--characters-config data/studio/scripts/
+  characters.json` (character LoRAs, e.g. tetsuya_oc → char v5 fused at 1.0 w/
+  style_weight 0.75; fuse-then-quantize per variant), launched `--guidance 4.5
   --steps 30 --quantize-fp8 --style-config data/studio/scripts/styles.json
-  --idle-unload-seconds 300`. (v2 = v1 + 65 hand-made backgrounds → clean,
-  coherent scenery; v1 kept as fallback. Beat Turbo in an A/B; Turbo deleted.)
+  --idle-unload-seconds 300` (see data/studio/scripts/start-studio.sh — the
+  authoritative launch args). (v2 kept as fallback; beat Turbo in an A/B.)
   The server AUTO-STARTS with the container (docker/studio.yml overlay
   → `data/studio/scripts/start-studio.sh`) — no manual launch needed.
 - **Style trigger is automatic** — the server auto-prepends `toei90s style,
@@ -66,6 +68,16 @@ Suggested first read for a fresh agent: ARCHITECTURE.md then ODYSSEUS.md.
   bf16 swap-in, ~2 min). For RELIABLE one-shot gen, Chat-tab → Z-Image direct beats the agent
   (the abliterated 8B is a flaky tool-driver).
 - Odysseus runs in Docker (`odysseus-odysseus-1`); LAN at `http://alienwaretv:7000`.
+- **ComfyUI power-bench (2026-07-31): `odysseus-comfyui` container on :8188**
+  (official clone at `data/studio/comfy/ComfyUI`, shares the odysseus torch stack
+  ro; models in `data/studio/comfy/models/` — Wan2.2 I2V fp8 pair for VIDEO,
+  `z_image_bf16` = our Z-Image BASE merged from local shards, studio LoRAs shared
+  via extra_model_paths.yaml). Saved studio workflows in
+  `ComfyUI/user/default/workflows/` ("Studio - …": Tetsuya wide, Style-only BGs,
+  Restyle img2img, Ride video). Wan gotchas + full detail:
+  `data/studio/comfy/` + BRIDGE.md 2026-07-31 entries. Template tiles with an
+  "API" badge (Wan2.6/2.7) are PAID CLOUD — never use. Comfy renders land in
+  `data/studio/comfy/output/`.
 
 ## How generation works (for explaining to the user)
 - **Agent chat** (uncensored `qwen3-vl-abliterated:8b`): "generate 3 images of …",

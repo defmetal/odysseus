@@ -197,9 +197,32 @@ def _styled(prompt: str) -> str:
     if _variant == "general":
         return prompt
     try:
-        return _apply_style(prompt) if _apply_style else prompt
+        out = _apply_style(prompt) if _apply_style else prompt
     except Exception:
-        return prompt
+        out = prompt
+    # Per-character canon suffix (registry field "prompt_suffix"): identity
+    # invariants (hair, earring) are auto-appended so users don't have to
+    # retype them every prompt (2026-07-21, after live tests dropped the
+    # earring/hair details). Phrases the user already typed are skipped
+    # (case-insensitive substring check per comma-phrase).
+    if _variant and _variant.startswith("char:"):
+        entry = _characters_registry.get(_variant[5:]) or {}
+        _suffix = entry.get("prompt_suffix") or ""
+        _add = [ph.strip() for ph in _suffix.split(",")
+                if ph.strip() and ph.strip().lower() not in out.lower()]
+        if _add:
+            out = out.rstrip().rstrip(",") + ", " + ", ".join(_add)
+    return out
+
+
+def _negative_default():
+    """Anti-text negative for styled/char renders. Z-Image renders text well,
+    so style-trigger tokens (e.g. 'smoon') otherwise materialize as literal
+    clothing lettering -- seen live 2026-07-21 ('TMOON' on a jacket back).
+    General variant gets none (no trigger tokens to leak)."""
+    if _variant == "general":
+        return None
+    return "text, letters, lettering, logo, watermark, signature"
 
 
 @asynccontextmanager
@@ -979,13 +1002,22 @@ def generate_image(req: ImageRequest):
                 guidance_scale=_args.guidance,
             )
         else:
-            result = _pipe(
+            _gen_kwargs = dict(
                 prompt=req.prompt,
                 width=width,
                 height=height,
                 num_inference_steps=steps,
                 guidance_scale=_args.guidance,
             )
+            _neg = _negative_default()
+            if _neg:
+                _gen_kwargs["negative_prompt"] = _neg
+            try:
+                result = _pipe(**_gen_kwargs)
+            except TypeError:
+                # pipeline without negative_prompt support -- retry bare
+                _gen_kwargs.pop("negative_prompt", None)
+                result = _pipe(**_gen_kwargs)
         img = result.images[0]
 
         # Convert to base64
