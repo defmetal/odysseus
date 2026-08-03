@@ -256,6 +256,44 @@ def _email_read_summary_from_tool_output(raw: str) -> str:
     return "\n".join(lines)
 
 
+def _looks_like_notes_list_request(text: str) -> bool:
+    """Whether the user is asking to see existing notes, not create one."""
+    t = (text or "").lower()
+    return bool(
+        re.search(r"\b(what|show|list|see|current|existing|all|my)\b.{0,60}\bnotes?\b", t)
+        or re.search(r"\bnotes?\b.{0,60}\b(what|show|list|see|current|existing|all|my)\b", t)
+    )
+
+
+def _note_list_summary_from_tool_output(raw: str, max_items: int = 20) -> str:
+    """Format manage_notes list/search output for chat without an LLM pass."""
+    if not isinstance(raw, str) or not raw.strip():
+        return ""
+    titles: list[str] = []
+    for line in raw.splitlines():
+        m = re.match(r"^\s*-\s+\[[^\]]+\]\s+\*\*(.*?)\*\*(.*)$", line)
+        if not m:
+            continue
+        title = re.sub(r"\s+", " ", m.group(1)).strip()
+        suffix = re.sub(r"\s+", " ", m.group(2) or "").strip()
+        label = f"{title} {suffix}".strip()
+        if label:
+            titles.append(label)
+        if len(titles) >= max_items:
+            break
+    if not titles:
+        if re.search(r"\b(no notes|0 notes|found 0)\b", raw, re.IGNORECASE):
+            return "No notes found."
+        return ""
+    total = len(re.findall(r"^\s*-\s+\[[^\]]+\]\s+\*\*", raw, re.MULTILINE))
+    heading_count = total or len(titles)
+    lines = [f"Here are your notes ({heading_count}):"]
+    lines.extend(f"- {title}" for title in titles)
+    if total and total > len(titles):
+        lines.append(f"- ...and {total - len(titles)} more")
+    return "\n".join(lines)
+
+
 def _load_mcp_disabled_map() -> Dict[str, set]:
     """Load per-server disabled tool sets from the database."""
     from core.database import McpServer, SessionLocal
@@ -437,6 +475,13 @@ When referencing app entities by id, use clickable markdown anchors:
 """
 
 _DOMAIN_RULES = {
+    "images": """\
+## Image rules
+- For image generation requests, use `generate_image` with the user's description as the prompt; pass an explicit size only when the user gives one.
+- To restyle an UPLOADED image into the trained style, use `restyle_image` (one prompt line). To fix ONE part of an uploaded image, use `inpaint_region` (region line + prompt line). These tools find the uploaded image, the file path, and the database themselves — NEVER run shell commands, search for files, or touch any database to do image editing; just call the tool once and report its result.
+- To fix face drift on an UPLOADED image (the face looks off-model/wrong in a wider shot), use `fix_faces` instead of a generic `inpaint_region` call — it's tuned specifically for a close-up face redraw (optional character-trigger line + optional expression/detail hint line, both may be omitted).
+- For a one-off dataset-factory edit of an UPLOADED image (colorize line art against a character's color reference, vary the pose/scene, or build a multi-view character turnaround sheet), use `reference_edit` (mode line: colorize/vary/turnaround, then an optional prompt line and an optional `ref: <character>` line). This runs a SEPARATE, heavier model (Qwen-Image-Edit-2511) from the Z-Image house style — never add a style trigger for it. It handles ONE uploaded image per call; batch runs are CLI-only, do not promise bulk processing.
+- For gallery-image edits (upscale, remove background), use `edit_image`.""",
     "web": """\
 ## Web rules
 - For web lookup/search/latest/current requests, use `web_search` or `web_fetch`.
@@ -468,6 +513,11 @@ _DOMAIN_RULES = {
 - Notes/todos/reminders use `manage_notes`, not memory.
 - Calendar create/update/delete should call `manage_calendar` with `action=list_calendars` first.
 - Recurring/automatic/scheduled requests create a `manage_tasks` task; do not just perform the action once.""",
+    "board": """\
+## Production board rules
+- The studio's production board (todo/doing/done work items for the animation studio) uses `task_add`/`task_move`/`task_list`/`task_update`. It is SHARED — both users see and edit the same board; it is NOT the same thing as `manage_tasks` (scheduled/recurring AI jobs) or `manage_notes` (personal reminders/todos) — do not confuse them.
+- To add a work item, use `task_add`. To change its status use `task_move` (not `task_update`). To rename/reassign/re-tag WITHOUT changing status, use `task_update`. To view the board, use `task_list`.
+- If `task_move`/`task_update` reports multiple matching tasks, show the candidates and ask which one, or reuse the exact id from `task_list` — never guess.""",
     "ui": """\
 ## UI rules
 - "Open/show <panel>" uses `ui_control open_panel <name>`.
@@ -498,11 +548,14 @@ _DOMAIN_RULES = {
 }
 
 _DOMAIN_TOOL_MAP = {
+    "images": {"generate_image", "edit_image", "restyle_image", "inpaint_region", "controlnet",
+               "fix_faces", "reference_edit"},
     "web": set(WEB_TOOL_NAMES),
     "documents": {"create_document", "edit_document", "update_document", "suggest_document", "manage_documents"},
     "email": {"list_email_accounts", "list_emails", "read_email", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact"},
     "cookbook": {"download_model", "serve_model", "serve_preset", "list_serve_presets", "list_served_models", "stop_served_model", "tail_serve_output", "list_downloads", "cancel_download", "search_hf_models", "list_cached_models", "list_cookbook_servers", "adopt_served_model"},
     "notes_calendar_tasks": {"manage_notes", "manage_calendar", "manage_tasks"},
+    "board": {"task_add", "task_move", "task_list", "task_update"},
     "ui": {"ui_control"},
     "sessions": {"create_session", "list_sessions", "manage_session", "send_to_session", "search_chats"},
     "files": {"bash", "python", "read_file", "write_file", "edit_file", "apply_patch", "todowrite", "grep", "glob", "ls", "get_workspace", "manage_bg_jobs"},
@@ -655,7 +708,43 @@ Suggest changes with explanations (for review/feedback requests).""",
 <size>
 <quality>
 ```
-Generate an image. Line 1 = description, line 2 = model name, line 3 = WxH (e.g. 1024x1024), line 4 = quality.""",
+Generate an image. Line 1 = description, line 2 = model name (LEAVE EMPTY to use the configured image model — never guess or invent model names), line 3 = WxH (e.g. 1024x1024), line 4 = quality.""",
+
+    "restyle_image": """\
+```restyle_image
+<prompt>
+<strength: optional>
+```
+Restyle the user's most recently UPLOADED image into the trained style (img2img). Use when they attach an image and say "restyle this", "make this in my style", "redraw this in 90s anime / sailor moon / cutie honey style", "convert this to the style". Line 1 = describe the image in plain words. Do NOT add a style trigger — it's applied automatically. If the user names a style ("90s anime", "cutie honey", "sailor moon look"), include their wording; otherwise the house style is used. OPTIONAL line 2 = how hard to repaint: `full` for a complete conversion (e.g. a photo or off-style image -> anime), `light` to keep most of the original, or leave it off for the balanced default. Use `full` when they say "convert/fully/completely/turn this into the style". The tool finds the uploaded image itself — do NOT look for files, paths, or run shell commands. Result lands in the Gallery.""",
+
+    "inpaint_region": """\
+```inpaint_region
+<region>
+<prompt>
+```
+Fix ONE part of the user's most recently UPLOADED image (inpaint). Use when they attach an image and say "fix her left hand", "redraw the face", "change the sign". Line 1 = the region to fix in plain words (e.g. "the left hand"). Line 2 = describe what to draw there in plain words — do NOT add a style trigger, it's automatic. The tool finds the image and locates the region itself — do NOT look for files, paths, masks, or run shell commands. Result lands in the Gallery.""",
+
+    "controlnet": """\
+```controlnet
+<prompt>
+<canny|scribble>
+```
+Turn the user's most recently UPLOADED sketch or reference into a finished on-model frame whose COMPOSITION follows it (ControlNet). Use when they attach a sketch/storyboard/pose/layout and say "turn this sketch into a frame", "make this on-model", "use this composition/pose". Line 1 = describe the scene in plain words — do NOT add a style trigger, it's automatic. Optional line 2 = 'canny' (default; follows a reference's edges) or 'scribble' (loose hand-drawn line-art). The tool finds the image itself — do NOT look for files or run shell commands. Heavier mode (~2 min; pauses normal image gen). Result lands in the Gallery.""",
+
+    "fix_faces": """\
+```fix_faces
+<character trigger: optional, e.g. tetsuya_oc>
+<expression/detail hint: optional>
+```
+Fix face drift on the user's most recently UPLOADED image (a close-up inpaint of just the face) — use when they attach an image and say "fix her face", "fix the face(s)", "the face looks off/wrong", "redraw his face". Both lines are optional and the body may be left EMPTY (a plain redraw of the face, no character/hint). Line 1 = a character trigger ONLY if the user named a specific trained character (e.g. `tetsuya_oc`) — leave it out otherwise, do not invent one. Line 2 = an optional expression or detail hint (e.g. "smiling", "surprised, blush"). Do NOT add a style trigger yourself — it's automatic. The tool locates the face itself — do NOT look for files, paths, masks, or run shell commands. v1 fixes the single largest/most prominent face only (not every face in a group shot). Result lands in the Gallery.""",
+
+    "reference_edit": """\
+```reference_edit
+<mode: colorize|vary|turnaround>
+<prompt: optional for colorize/turnaround, REQUIRED for vary>
+ref: <character name, optional>
+```
+One-off dataset-factory edit of the user's most recently UPLOADED image via the Qwen-Image-Edit-2511 model — a SEPARATE, heavier pipeline from the house Z-Image style (no style trigger; never add one). Use when they attach an image and say "colorize this line art", "colorize this against <character>'s colors", "vary the pose but keep her the same", "make a turnaround/character sheet from this". Line 1 = mode: `colorize` (line art -> colored, needs a `ref:` character), `vary` (new pose/expression/scene, prompt REQUIRED), or `turnaround` (multi-view character sheet). Line 2 = the prompt describing the change (optional for colorize/turnaround — sensible defaults apply; REQUIRED for vary, do not omit it). Optional `ref:` line names a trained character (e.g. `tetsuya`) whose canonical color reference image is used alongside the upload — REQUIRED for `colorize`, optional for `vary`, unused for `turnaround`. Handles ONE uploaded image per call — batch runs are CLI-only, do NOT promise bulk/multiple-image processing. Heavier mode (model swap-in; can take several minutes). Result lands in the Gallery.""",
 
     "chat_with_model": "- ```chat_with_model``` — Ask a DIFFERENT AI model and relay its answer. Line 1 = model name (or 'model@endpoint'), rest = your message. Use when the user says 'ask <model>', 'what does <model> think', or wants to compare/their answer from another model.",
     "ask_teacher": "- ```ask_teacher``` — Escalate a hard question to a more capable model. Line 1 = model name or 'auto', rest = the question. Use when stuck or need expert knowledge.",
@@ -720,6 +809,33 @@ If `dtend` omitted, defaults to dtstart+1h (or +1d when `all_day: true`). \
 For a RECURRING event pass `rrule` as an iCalendar RRULE string, e.g. `"FREQ=WEEKLY;BYDAY=MO"` (every Monday), `"FREQ=DAILY;COUNT=10"`, or `"FREQ=MONTHLY;BYMONTHDAY=1"` — create ONE event with the rrule, do not loop creating many events. Do not pass `rrule` for "next Wednesday only", "just this once", or any single occurrence. \
 If the user asks for a reminder/alarm before the event, pass `reminder_minutes` as an integer; do not write reminder text into the event description and do NOT also call `manage_notes` for the same reminder because calendar reminders are routed through Notes automatically. \
 `calendar` accepts a name ("Main") or short-id prefix.""",
+    "task_add": """\
+```task_add
+<title>
+status: <todo|doing|done, optional — default todo>
+assignee: <name, optional>
+tags: <comma-separated tags, optional>
+```
+Add a work item to the studio's SHARED production board — NOT a scheduled/recurring AI job (that's `manage_tasks`) and NOT a personal reminder (that's `manage_notes`). Line 1 = the task title. Optional lines: `status:` (todo/doing/done, default todo), `assignee:` (a name), `tags:` (comma-separated). Omit any optional line you don't need — do not echo the placeholder text literally. The board is shared: every user sees every task.""",
+    "task_move": """\
+```task_move
+<task id or title>
+<new status: todo|doing|done>
+```
+Move a task on the shared production board to a new status. Line 1 identifies the task — paste the id shown by `task_list`, or the task's title (fuzzy-matched). Line 2 = the new status (todo/doing/done). If the title matches more than one task, the tool returns the candidates instead of guessing — relay them to the user (or pick contextually) and retry with the exact id.""",
+    "task_list": """\
+```task_list
+<status filter: todo|doing|done — optional>
+```
+Show the studio's shared production board. Leave the body empty for everything grouped into Todo/Doing/Done columns, or put a single status on line 1 to see only that column. Use this for "what's on the board", "what's in doing/todo/done", "show the production board".""",
+    "task_update": """\
+```task_update
+<task id or title>
+title: <new title, optional>
+assignee: <new assignee, optional>
+tags: <new comma-separated tags, optional>
+```
+Retitle, reassign, or re-tag an existing production-board task WITHOUT changing its status (use `task_move` for status changes). Line 1 identifies the task (id or fuzzy title, same resolution as `task_move`). Include only the field(s) you're changing.""",
     "create_session": "- ```create_session``` — Create a new chat. Line 1 = chat name, line 2 = model name. Use for background/parallel work.",
     "list_sessions": "- ```list_sessions``` — List chats sorted MOST-RECENT FIRST (the UI calls them 'chats') with clickable chat-title links. Output includes a relative \"last active\" timestamp per row, so the first row is the user's most recent chat. Content = optional filter keyword (matches chat name). When answering, preserve the `[title](#session-id)` links exactly; do not convert them into plain text.",
     "send_to_session": "- ```send_to_session``` — Send a message to another session. Line 1 = session_id, rest = message. Use for orchestrating work across sessions.",
@@ -1272,6 +1388,37 @@ def _assistant_requested_followup(messages: List[Dict]) -> bool:
     return False
 
 
+def _latest_user_has_image(messages: List[Dict]) -> bool:
+    """True if the most recent user turn carries an image attachment.
+
+    Attachments arrive as multimodal content parts (``{"type": "image_url", ...}``)
+    or an embedded ``data:image`` URI — NOT as any text marker. The classifier
+    used to look for a literal ``"[image attached"`` string that nothing ever
+    injected, so edit intent on an attached image was never detected and the
+    model defaulted to generate_image (a brand-new picture). This inspects the
+    actual message structure instead.
+    """
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            for b in content:
+                if not isinstance(b, dict):
+                    continue
+                if b.get("type") in ("image_url", "image", "input_image"):
+                    return True
+                if "image_url" in b or "image_data" in b:
+                    return True
+                if isinstance(b.get("text"), str) and "data:image" in b["text"]:
+                    return True
+            return False
+        if isinstance(content, str):
+            return "data:image" in content
+        return False
+    return False
+
+
 def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, object]:
     """Classify only whether this turn deserves domain tool retrieval.
 
@@ -1305,10 +1452,69 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         domains.add("email")
     if has(r"\b(notes?|todos?|to-dos?|checklists?|tasks?|task list|remind me|reminders?|buy|pickup|pick up)\b"):
         domains.add("notes_calendar_tasks")
+    if has(r"\b(images?|picture|photo|illustration|drawing|draw|sketch|render|artwork|wallpaper|inpaint|img2img|text-to-image|generate.{0,20}(?:image|picture|art)|make.{0,20}(?:image|picture))\b"):
+        domains.add("images")
+    # Image EDITING (restyle/inpaint) is handled by the restyle_image /
+    # inpaint_region TOOLS in the images domain — route here, and deliberately
+    # do NOT grant shell, so a weak model can't improvise file/db commands.
+    _img_edit_verb = has(
+        r"\b(restyle|inpaint|img2img|redraw|re-?draw|retouch|touch[- ]?up)\b",
+        r"\bfix\b.{0,40}\b(hand|hands|face|faces|eyes?|fingers?|mouth|hair|arms?|legs?|background|expression)\b",
+        r"\b(in (?:my|the toei|toei|the 90s)|my) style\b",
+        r"\bedit (?:this|the|my) (?:image|picture|photo|frame|drawing|illustration|art)\b",
+        r"\bon.?model\b",
+        r"\b(turn|make)\b.{0,25}\b(sketch|storyboard|pose|line ?art|drawing|reference)\b.{0,25}\b(into|frame|on.?model)\b",
+        r"\b(use|follow|match)\b.{0,15}\b(this|the|my)\b.{0,8}\b(pose|composition|layout|sketch)\b",
+        # reference_edit vocabulary (QIE dataset-factory tool): colorize is
+        # unambiguous. "turnaround" alone is deliberately EXCLUDED — "what's
+        # the turnaround time on my order" is common unrelated business
+        # phrasing — so it only counts paired with character/sheet wording.
+        r"\bcoloriz(?:e|ing|ed|ation)\b",
+        r"\bcolouris(?:e|ing|ed|ation)\b",
+        r"\bcharacter\s+(?:sheet|turnaround)\b",
+        r"\bturnaround\s+sheet\b",
+        r"\bsheet\b.{0,20}\bturnaround\b",
+    )
+    # When an image is attached, the DEFAULT intent is to EDIT it (you attached
+    # it for a reason) unless the message explicitly asks for a brand-NEW image.
+    # So an attachment alone -> images domain + edit tools, which catches the
+    # verb-less phrasings the old check missed ("make her hair red", "give her a
+    # hat", "darker background", "remove the cup").
+    _has_attachment = _latest_user_has_image(messages) or ("[image attached" in q)
+    _wants_new_image = has(
+        r"\b(generate|create|make|draw|render|paint)\b.{0,25}\b(images?|pictures?|art|illustration|drawing|wallpaper|portrait|scene)\b",
+        r"\b(new|another|one more|second|third|\d+)\b.{0,15}\b(images?|pictures?|versions?|variations?)\b",
+    )
+    edit_only = (_img_edit_verb or _has_attachment) and not _wants_new_image
+    if _img_edit_verb or (_has_attachment and not _wants_new_image):
+        domains.add("images")
+    if has(r"\b(cookbook|serve|serving|served|launch|start|preset|vllm|sglang|llama\.?cpp|ollama|download|downloading|pull|cached models?|running models?|model servers?|models? (?:are )?running|what models?|model picker|gpu box|kierkegaard|odysseus|ajax|qwen|gemma|llama|mistral|minimax)\b"):
+        domains.add("cookbook")
+    if has(r"\b(emails?|mails?|gmail|inbox|reply|forward|cc|bcc|send email|compose email|draft email|message chris|message him|message her)\b"):
+        domains.add("email")
+    if has(r"\b(notes?|todos?|to-dos?|checklists?|task list|remind me|reminders?|buy|pickup|pick up)\b"):
+        domains.add("notes_calendar_tasks")
     if has(r"\b(every day|every morning|every evening|recurring|automatically|cron|scheduled task|background task)\b"):
         domains.add("notes_calendar_tasks")
     if has(r"\b(calendar|event|meeting|appointment|schedule)\b"):
         domains.add("notes_calendar_tasks")
+    # Studio production board (Phase 5 PM board) — distinct vocabulary from
+    # notes_calendar_tasks above: keyed on "board" plus a status word/verb, or
+    # a status word plus a question/action verb, so it doesn't fire on plain
+    # English uses of "board" ("the board of directors") or "done"/"doing" in
+    # unrelated sentences. Covers: "add X to the board", "what's on the
+    # board", "move X to done", "what's in doing", "mark X as done".
+    if has(
+        r"\b(production board|task board|kanban(?:\s+board)?|pm board)\b",
+        r"\b(?:what'?s|show|show me|open|check)\b.{0,20}\b(?:on|in)\s+(?:the\s+)?board\b",
+        r"\bwhat'?s\s+in\s+(?:todo|to-do|doing|done)\b",
+        r"\badd\b.{0,40}\bto\s+(?:the\s+)?board\b",
+        r"\bput\b.{0,40}\bon\s+(?:the\s+)?board\b",
+        r"\bmove\b.{0,60}\bto\s+(?:todo|to-do|doing|done)\b",
+        r"\bmark\b.{0,40}\bas\s+(?:todo|to-do|doing|done|in progress|complete|completed)\b",
+        r"\bboard\b.{0,20}\b(?:todo|to-do|doing|done)\b",
+    ):
+        domains.add("board")
     _code_write_intent = has(
         r"\b(?:python|javascript|typescript|java|c\+\+|cpp|c#|csharp|rust|go|golang|"
         r"ruby|php|swift|kotlin|bash|shell|html|css|sql)\b",
@@ -1371,6 +1577,7 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         "continuation": continuation,
         "domains": domains,
         "retrieval_query": retrieval_query,
+        "edit_only": edit_only,
     }
 
 
@@ -3433,6 +3640,13 @@ async def stream_agent_loop(
             _relevant_tools = set(_WORKSPACE_TERMINUS_TOOLS)
             logger.info("[tool-rag] Workspace file/terminal request; using Odysseus Terminus toolset")
 
+    # Plain-English image-EDIT intent ("fix this", "change the background"): drop
+    # generate_image so the weak agent edits the image in front of it
+    # (restyle_image / inpaint_region) instead of making a brand-new one. Kept
+    # whenever the user actually wants a new image (classifier sets edit_only=False).
+    if _relevant_tools is not None and _intent.get("edit_only"):
+        _relevant_tools.discard("generate_image")
+
     # If this turn targets the open document, keep editing tools available
     # regardless of which selection path (RAG, keyword, caller-provided) ran.
     # Do not leak document tools into unrelated turns just because the editor
@@ -4982,6 +5196,47 @@ async def stream_agent_loop(
                     full_response = _terminal_summary
                     if _terminal_summary not in _clean_current:
                         yield f'data: {json.dumps({"delta": _terminal_summary})}\n\n'
+                    _ody_notes_tool_completed = True
+
+            # This must be the final UI event for ask_user: the frontend appends
+            # the card below the now-settled tool node and cancels any between-
+            # round spinner.  The turn ends after the current tool batch.
+            if _pending_ask_user_event:
+                yield (
+                    f'data: {json.dumps({"type": "ask_user", "data": _pending_ask_user_event})}\n\n'
+                )
+
+            if block.tool_type == "manage_notes":
+                _notes_action = ""
+                try:
+                    _notes_args = json.loads(block.content or "{}")
+                    if isinstance(_notes_args, dict):
+                        _notes_action = str(_notes_args.get("action") or "").lower()
+                except Exception:
+                    _notes_action = ""
+                _notes_text = ""
+                if not result.get("error"):
+                    if _notes_action in {"list", "search", "find", "view", "lis"}:
+                        _notes_text = _note_list_summary_from_tool_output(
+                            result.get("output") or result.get("results") or result.get("content") or ""
+                        )
+                    elif _notes_action in {"add", "update", "delete", "toggle_item"}:
+                        _notes_text = str(
+                            result.get("response")
+                            or result.get("output")
+                            or result.get("results")
+                            or ""
+                        ).strip()
+                        if _notes_text.startswith("AI: "):
+                            _notes_text = _notes_text[4:].strip()
+                        if _notes_text and not re.match(r"^(done|note|item|deleted)\b", _notes_text, re.IGNORECASE):
+                            _notes_text = f"Done — {_notes_text}"
+                if _notes_text:
+                    _clean_current = strip_tool_blocks(full_response).strip()
+                    if _notes_text not in _clean_current:
+                        _prefix = "\n\n" if _clean_current else ""
+                        full_response = (_clean_current + _prefix + _notes_text).strip()
+                        yield f'data: {json.dumps({"delta": _prefix + _notes_text})}\n\n'
                     _ody_notes_tool_completed = True
 
             # This must be the final UI event for ask_user: the frontend appends
