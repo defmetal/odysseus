@@ -47,6 +47,15 @@ DEFAULT_SETTINGS = {
     # Public base URL used to build clickable deep-links in outgoing alerts
     # (e.g., urgency alert email). Example: "https://chat.example.com"
     "app_public_url": "",
+    # Base URL of the ComfyUI server backing the Image/Video tabs
+    # (routes/comfy_routes.py, src/comfy_client.py). host.docker.internal
+    # reaches the host's odysseus-comfyui container from inside the
+    # odysseus container the same way Ollama (:11434) and the Grok/Claude
+    # shims (:8200/8300/8400) already do -- verified reachable 2026-08-03,
+    # ComfyUI v0.29.0 (PLAN-IMAGE-VIDEO-TABS.md §2). A settings key, not a
+    # hardcoded constant, because odysseus-comfyui runs outside
+    # docker-compose (plain `docker run`, no fixed address guarantee).
+    "comfy_base_url": "http://host.docker.internal:8188",
     "tts_enabled": True,
     "tts_provider": "disabled",
     "tts_model": "tts-1",

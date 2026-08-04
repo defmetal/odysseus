@@ -25,7 +25,15 @@ export const KEYS = {
   ADMIN_LAST_TAB: 'admin-last-tab',
   DENSITY: 'odysseus-density',
   UI_SCALE: 'odysseus-ui-scale',
-  WORKSPACE: 'odysseus-workspace'
+  WORKSPACE: 'odysseus-workspace',
+  // Image/Video tab generation parameters (static/js/genParams.js). Global
+  // defaults, overridden per chat session — see loadGenDefaults/loadGenSessions.
+  GEN_DEFAULTS: 'odysseus-gen-defaults',
+  GEN_SESSIONS: 'odysseus-gen-sessions',
+  // In-flight ComfyUI job bookkeeping (job_id -> {sessionId, startedAt, ...})
+  // so a session switch or page reload can re-open the SSE progress stream
+  // instead of orphaning the bubble — see loadGenInflight/saveGenInflight.
+  GEN_INFLIGHT: 'odysseus-gen-inflight'
 };
 
 /**
@@ -109,6 +117,41 @@ export function setToggle(name, value) {
   saveToggleState(state);
 }
 
+// ── Image/Video generation-parameter helpers ──
+// Global defaults live under GEN_DEFAULTS; a chat session may override any
+// subset of fields under GEN_SESSIONS[sessionId]. Callers compute the
+// effective params themselves as {...defaults, ...sessionOverride} (per-kind,
+// e.g. defaults.image / sessions[id].image) — kept dumb here on purpose, same
+// division of responsibility as loadToggleState/saveToggleState above.
+
+export function loadGenDefaults() {
+  return getJSON(KEYS.GEN_DEFAULTS, {});
+}
+
+export function saveGenDefaults(state) {
+  setJSON(KEYS.GEN_DEFAULTS, state);
+}
+
+export function loadGenSessions() {
+  return getJSON(KEYS.GEN_SESSIONS, {});
+}
+
+export function saveGenSessions(state) {
+  setJSON(KEYS.GEN_SESSIONS, state);
+}
+
+// ── In-flight generation job bookkeeping (progress reattach) ──
+// Shape: { [jobId]: { jobId, sessionId, kind, prompt, params, startedAt } }.
+// Kept dumb here too — genParams.js owns pruning/staleness rules.
+
+export function loadGenInflight() {
+  return getJSON(KEYS.GEN_INFLIGHT, {});
+}
+
+export function saveGenInflight(state) {
+  setJSON(KEYS.GEN_INFLIGHT, state);
+}
+
 const Storage = {
   KEYS,
   getJSON,
@@ -119,7 +162,13 @@ const Storage = {
   loadToggleState,
   saveToggleState,
   getToggle,
-  setToggle
+  setToggle,
+  loadGenDefaults,
+  saveGenDefaults,
+  loadGenSessions,
+  saveGenSessions,
+  loadGenInflight,
+  saveGenInflight
 };
 
 export default Storage;

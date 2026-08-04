@@ -354,6 +354,11 @@ class GalleryImage(TimestampMixin, Base):
     quality    = Column(String, nullable=True)
     tags       = Column(String, nullable=True, default="")
     ai_tags    = Column(Text, nullable=True, default="")       # AI-generated tags (comma-separated)
+    # Full generation params (prompt/negative/loras/seed/steps/cfg/sampler/
+    # scheduler/denoise/etc.) + source workflow name, JSON-encoded, for images
+    # landed from the ComfyUI Image/Video tabs (routes/comfy_routes.py). NULL
+    # for every other insert site -- nothing else writes generation params.
+    gen_params = Column(Text, nullable=True)
     session_id = Column(String, ForeignKey("sessions.id", ondelete="SET NULL"), nullable=True, index=True)
     album_id   = Column(String, ForeignKey("gallery_albums.id", ondelete="SET NULL"), nullable=True, index=True)
     owner      = Column(String, nullable=True, index=True)
@@ -1278,6 +1283,32 @@ def _migrate_add_gallery_caption_column():
             pass
 
 
+def _migrate_add_gallery_gen_params_column():
+    """Add gen_params (full generation-params JSON) storage for gallery
+    images landed from the ComfyUI Image/Video tabs (routes/comfy_routes.py,
+    PLAN-IMAGE-VIDEO-TABS.md §6.4). Mirrors _migrate_add_gallery_caption_column
+    above -- same table, same idempotent add-if-missing pattern."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(gallery_images)").fetchall()]
+        if columns and "gen_params" not in columns:
+            conn.execute("ALTER TABLE gallery_images ADD COLUMN gen_params TEXT")
+            conn.commit()
+            logging.getLogger(__name__).info("Migrated: added gen_params column to gallery_images")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Migration gallery gen_params column failed: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def _migrate_add_api_token_scopes_column():
     """Add API token scopes for existing installs.
 
@@ -1996,6 +2027,7 @@ def init_db():
     _migrate_encrypt_signatures()
     _migrate_encrypt_endpoint_keys()
     _migrate_backfill_task_folders()
+    _migrate_add_gallery_gen_params_column()
 
 
 def _migrate_backfill_task_folders():

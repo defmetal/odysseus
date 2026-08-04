@@ -751,6 +751,10 @@ app.include_router(setup_signature_routes())
 from routes.gallery.gallery_routes import setup_gallery_routes
 app.include_router(setup_gallery_routes())
 
+# ComfyUI-backed Image/Video tabs (studio-only; see PLAN-IMAGE-VIDEO-TABS.md)
+from routes.comfy_routes import setup_comfy_routes
+app.include_router(setup_comfy_routes())
+
 # Persisted image-editor drafts (server-backed projects)
 from routes.editor_draft_routes import setup_editor_draft_routes
 app.include_router(setup_editor_draft_routes())

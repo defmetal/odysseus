@@ -45,6 +45,11 @@ mcp<2
 pyotp
 qrcode[pil]
 croniter
+# Async WebSocket client for src/comfy_client.py's live ComfyUI progress
+# stream (routes/comfy_routes.py, PLAN-IMAGE-VIDEO-TABS.md §6.1). Not pulled
+# in transitively -- requirements.txt pins bare `uvicorn` (no [standard]
+# extras), which is the only other thing here that could have brought it in.
+websockets
 pytest
 pytest-asyncio
 # starlette.testclient prefers httpx2 since Starlette 1.2.0 and warns on every

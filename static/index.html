@@ -1185,10 +1185,27 @@
           </button>
         </div>
         <div class="chat-input-right">
-          <!-- Agent / Chat mode toggle -->
-          <div class="mode-toggle">
+          <!-- Generation-parameters popup trigger (Image/Video mode only) -->
+          <div class="gen-params-wrap" id="gen-params-wrap" style="display:none;">
+            <button type="button" class="gen-params-btn" id="gen-params-btn" title="Generation parameters" aria-label="Generation parameters">
+              <span id="gen-params-label">Params</span> <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg>
+            </button>
+            <div class="model-picker-menu gen-params-menu hidden" id="gen-params-menu">
+              <div class="gen-params-tabs" id="gen-params-tabs">
+                <button type="button" class="gen-params-tab active" data-gen-tab="simple">Simple</button>
+                <button type="button" class="gen-params-tab" data-gen-tab="advanced">Advanced</button>
+              </div>
+              <div class="gen-params-body" id="gen-params-body">
+                <!-- populated by static/js/genParams.js -->
+              </div>
+            </div>
+          </div>
+          <!-- Agent / Chat / Image / Video mode toggle -->
+          <div class="mode-toggle mode-toggle-four">
             <button type="button" class="mode-toggle-btn active" id="mode-agent-btn" aria-pressed="true">Agent</button>
             <button type="button" class="mode-toggle-btn" id="mode-chat-btn" aria-pressed="false">Chat</button>
+            <button type="button" class="mode-toggle-btn" id="mode-image-btn" aria-pressed="false">Image</button>
+            <button type="button" class="mode-toggle-btn" id="mode-video-btn" aria-pressed="false">Video</button>
           </div>
           <button type="submit" form="chat-form" class="send-btn newchat-mode" data-mode="newchat" aria-label="New chat">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg><span class="send-btn-label">+ New</span>

@@ -11,6 +11,7 @@ import ragModule from './js/rag.js';
 import presetsModule from './js/presets.js';
 import searchModule from './js/search.js';
 import chatModule from './js/chat.js?v=20260722ctxheader4';
+import genParamsModule from './js/genParams.js';
 import compareModule from './js/compare/index.js?v=20260723compareicon2';
 import documentModule from './js/document.js?v=20260722emailfastindex1';
 import searchChatModule from './js/search-chat.js';
@@ -52,6 +53,7 @@ window.sessionModule = sessionModule;
 window.uiModule = uiModule;
 window.adminModule = adminModule;
 window.cookbookModule = cookbookModule;
+window.genParamsModule = genParamsModule;
 
 function _isMobileChatInput() {
   return window.innerWidth <= 768;
@@ -1776,9 +1778,16 @@ function initializeEventListeners() {
   }
 
   function applyModeToToggles(mode) {
+    const isGenMode = mode === 'image' || mode === 'video';
     MODE_TOOLS.forEach(({ btnId, checkboxId, stateKey }) => {
       const btn = el(btnId);
       if (!btn) return;
+      // Image/Video modes have no agent tools at all — Shell and Web both
+      // hide, the same way Shell already hides in Chat mode.
+      if (isGenMode) {
+        btn.style.display = 'none';
+        return;
+      }
       // Hide bash button in chat mode
       if (mode === 'chat' && stateKey === 'bash') {
         btn.style.display = 'none';
@@ -1791,18 +1800,34 @@ function initializeEventListeners() {
       btn.classList.toggle('active', on);
       if (checkboxId) { const chk = el(checkboxId); if (chk) chk.checked = on; }
     });
+    // Research lives outside MODE_TOOLS (an overflow-menu entry point, not a
+    // composer pill) — hide it the same way in Image/Video mode, where
+    // there's no agent/chat turn to attach a research run to. On the way
+    // back out, re-derive visibility through the Customize-UI machinery
+    // rather than hardcoding display:'', so a user who hid this button via
+    // Customize UI doesn't see it reappear just by leaving Image/Video mode.
+    const researchOverflowBtn = el('overflow-research-btn');
+    if (researchOverflowBtn) {
+      if (isGenMode) researchOverflowBtn.style.display = 'none';
+      else if (typeof applyUIVis === 'function' && typeof loadUIVis === 'function') applyUIVis(loadUIVis());
+    }
   }
 
-	  // ── Agent / Chat mode toggle ──
+	  // ── Agent / Chat / Image / Video mode toggle ──
 	  (function initModeToggle() {
     const agentBtn = el('mode-agent-btn');
     const chatBtn = el('mode-chat-btn');
+    const imageBtn = el('mode-image-btn');
+    const videoBtn = el('mode-video-btn');
     if (!agentBtn || !chatBtn) return;
     const state = loadToggleState();
     let currentMode = state.mode || 'chat';
 
-    // Immediately hide bash button in chat mode on page load
-    if (currentMode === 'chat') {
+    // Immediately hide bash button on page load unless starting in agent
+    // mode — it's agent-only in Chat, Image and Video alike, so avoid a
+    // flash of it before the 500ms staggered applyModeToToggles below would
+    // otherwise hide it.
+    if (currentMode !== 'agent') {
       const bashBtn = el('bash-toggle-btn');
       if (bashBtn) bashBtn.style.display = 'none';
     }
@@ -1814,13 +1839,31 @@ function initializeEventListeners() {
       saveToggleState(st);
       agentBtn.classList.toggle('active', mode === 'agent');
       chatBtn.classList.toggle('active', mode === 'chat');
+      if (imageBtn) imageBtn.classList.toggle('active', mode === 'image');
+      if (videoBtn) videoBtn.classList.toggle('active', mode === 'video');
       agentBtn.setAttribute('aria-pressed', String(mode === 'agent'));
       chatBtn.setAttribute('aria-pressed', String(mode === 'chat'));
-      // Slide the pill to the active button
+      if (imageBtn) imageBtn.setAttribute('aria-pressed', String(mode === 'image'));
+      if (videoBtn) videoBtn.setAttribute('aria-pressed', String(mode === 'video'));
+      // Slide the pill to the active button. `.mode-chat` is the pre-existing
+      // position-2 trigger — kept as-is (not renamed) because roughly a dozen
+      // call sites outside this IIFE (chat.js, chatStream.js, compare/index.js,
+      // document.js, init.js, slashCommands.js, workspace.js) flip it directly
+      // without going through setMode(), and translateX(100%) is relative to
+      // the pill's OWN width — so .mode-chat still lands correctly now that
+      // .mode-toggle-four makes the pill 25% wide instead of 50%. `.mode-third`
+      // / `.mode-fourth` are the genuinely new positions, for Image / Video.
       const toggle = agentBtn.closest('.mode-toggle');
-      if (toggle) toggle.classList.toggle('mode-chat', mode === 'chat');
+      if (toggle) {
+        toggle.classList.toggle('mode-chat', mode === 'chat');
+        toggle.classList.toggle('mode-third', mode === 'image');
+        toggle.classList.toggle('mode-fourth', mode === 'video');
+      }
       // Workspace pill + overflow entry are agent-only - hide immediately (no flash).
       try { workspaceModule.applyMode(mode); } catch (_) {}
+      // Gen-params trigger button is Image/Video-only — let genParams.js
+      // show/hide/reconfigure its own popup for the new mode.
+      try { window.genParamsModule && window.genParamsModule.onModeChange && window.genParamsModule.onModeChange(mode); } catch (_) {}
       // Delay tool glow-up for a staggered effect
       setTimeout(() => applyModeToToggles(mode), 500);
     }
@@ -1832,6 +1875,8 @@ function initializeEventListeners() {
       setMode('agent');
     });
     chatBtn.addEventListener('click', () => setMode('chat'));
+    if (imageBtn) imageBtn.addEventListener('click', () => setMode('image'));
+    if (videoBtn) videoBtn.addEventListener('click', () => setMode('video'));
 	    setMode(currentMode);
 	  })();
 
@@ -3732,6 +3777,7 @@ function startOdysseusApp() {
   searchModule.init(API_BASE);
   chatModule.init(API_BASE);
   chatModule.initListeners();
+  genParamsModule.init(API_BASE);
   groupModule.init(API_BASE);
   // Initialize compare module
   if (compareModule) {

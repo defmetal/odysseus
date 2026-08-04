@@ -78,6 +78,7 @@ The largest and most central subsystem. Chat submission → backend SSE → prog
 |---|---|
 | **`models.js`** | Model discovery / scanning, local model port probing, provider management, model selection UI state. |
 | **`modelPicker.js`** | Composer model-picker dropdown and endpoint selection. |
+| **`genParams.js`** | Image/Video mode parameters popup (`Z-Image ^`-style, copied from modelPicker.js) — workflow picker, Simple/Advanced ComfyUI params, LoRA registry picker, global-defaults-overridden-per-session persistence, and the `/api/comfy/*` send path: POSTs `/api/comfy/generate`, renders progress via SSE (`/api/comfy/stream/{job_id}`) inside a chat bubble, and lands results as image/video bubbles. See `data/studio/PLAN-IMAGE-VIDEO-TABS.md`. |
 | **`modelSort.js`** | Sorting helpers for model lists. |
 | **`model/matchKey.js`** | Model-to-key matching helper. |
 | **`providers.js`** | Provider metadata and account-management helpers. |

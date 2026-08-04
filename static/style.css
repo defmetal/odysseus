@@ -2997,10 +2997,32 @@ body.bg-pattern-sparkles {
     .mode-toggle.mode-toggle-three.mode-third::before {
       transform: translateX(200%);
     }
-    #mode-agent-btn {
+    /* 4-way variant (Agent / Chat / Image / Video). Position 2 (Chat) reuses
+       the pre-existing .mode-chat trigger just above rather than a new class
+       — translateX(100%) is relative to the pill's OWN width, so it still
+       lands correctly now that this pill is 25% wide instead of 50%. That
+       keeps roughly a dozen call sites elsewhere (chat.js, chatStream.js,
+       compare/index.js, document.js, init.js, slashCommands.js, workspace.js)
+       working unmodified — they flip .mode-chat directly without going
+       through app.js's setMode(). .mode-third / .mode-fourth are the
+       genuinely new positions, for Image / Video. */
+    .mode-toggle.mode-toggle-four::before {
+      width: 25%;
+    }
+    .mode-toggle.mode-toggle-four.mode-third::before {
+      transform: translateX(200%);
+    }
+    .mode-toggle.mode-toggle-four.mode-fourth::before {
+      transform: translateX(300%);
+    }
+    /* Structural, not ID-based — the pill's first/last child rounds to match
+       the container regardless of whether it's a 2-way, 3-way or 4-way pill.
+       (Previously #mode-agent-btn / #mode-chat-btn were hardcoded here, which
+       silently mis-rounded when Chat stopped being the last button.) */
+    .mode-toggle-btn:first-child {
       border-radius: 10px 0 0 10px;
     }
-    #mode-chat-btn {
+    .mode-toggle-btn:last-child {
       border-radius: 0 10px 10px 0;
     }
     .mode-toggle-btn {
@@ -3044,6 +3066,19 @@ body.bg-pattern-sparkles {
         content: 'Unif';
         font-size: 11px;
       }
+      /* Four labels (Agent/Chat/Image/Video) don't fit the composer pill on
+         mobile — same fix as the llama "Unified" label above: collapse the
+         real button text then paint a short label back in with ::after.
+         Higher specificity than .mode-toggle-btn's mobile touch-target rule
+         below (font-size:12px/padding:0 14px), so this wins without !important. */
+      .mode-toggle.mode-toggle-four .mode-toggle-btn {
+        font-size: 0;
+        padding: 0 6px;
+      }
+      .mode-toggle.mode-toggle-four #mode-agent-btn::after { content: 'Agt'; font-size: 11px; }
+      .mode-toggle.mode-toggle-four #mode-chat-btn::after { content: 'Chat'; font-size: 11px; }
+      .mode-toggle.mode-toggle-four #mode-image-btn::after { content: 'Img'; font-size: 11px; }
+      .mode-toggle.mode-toggle-four #mode-video-btn::after { content: 'Vid'; font-size: 11px; }
     }
     /* Message count badge in the chat-meta header (next to the title).
        Auto-hides when empty so a brand-new chat doesn't show "0 msgs". */
@@ -4949,8 +4984,8 @@ body.bg-pattern-sparkles {
         font-size: 12px;
         min-height: 34px;
       }
-      #mode-agent-btn { border-radius: 12px 0 0 12px; }
-      #mode-chat-btn { border-radius: 0 12px 12px 0; }
+      .mode-toggle-btn:first-child { border-radius: 12px 0 0 12px; }
+      .mode-toggle-btn:last-child { border-radius: 0 12px 12px 0; }
       /* Diff mode — stack toolbar, bigger buttons */
       .diff-toolbar {
         padding: 8px 12px;
@@ -39786,11 +39821,13 @@ body.research-panel-view #research-divider { display:none; }
   font-size:11px; color:#f44336; margin-top:4px; line-height:1.4;
   word-break:break-word;
 }
-.research-progress-bar {
+.research-progress-bar,
+.progress-bar {
   height:3px; background:var(--border); border-radius:2px; margin-top:6px;
   overflow:hidden;
 }
-.research-progress-fill {
+.research-progress-fill,
+.progress-fill {
   height:100%; background:var(--accent-primary, var(--red));
   border-radius:2px; transition:width 0.4s ease;
 }
@@ -41129,4 +41166,282 @@ body.theme-frosted .modal {
 @media (max-width: 768px) {
   .compare-grid[data-cols] { grid-template-columns: 1fr !important; overflow-y: auto; }
   .compare-pane { min-height: 60dvh; }
+}
+
+/* ── Image/Video generation-parameters popup (static/js/genParams.js) ──
+   Structural positioning/hide/roll-up-down animation is inherited from
+   .model-picker-menu (style.css ~3240) by putting BOTH classes on the same
+   element — this block only adds gen-params-specific sizing/layout on top,
+   per the plan's "generalise, don't reinvent" instruction. */
+.gen-params-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+.gen-params-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 10px;
+  font-size: 11px;
+  font-weight: 500;
+  font-family: inherit;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: color-mix(in srgb, var(--fg) 65%, transparent);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.gen-params-btn:hover,
+.gen-params-btn.active {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  color: var(--fg);
+}
+.gen-params-btn svg { flex-shrink: 0; opacity: 0.5; }
+.gen-params-menu {
+  min-width: 300px;
+  max-width: min(420px, calc(100vw - 24px));
+  max-height: min(560px, 70vh);
+  overflow-y: auto;
+}
+.gen-params-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+}
+.gen-params-tab {
+  flex: 1;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: inherit;
+  color: color-mix(in srgb, var(--fg) 45%, transparent);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.gen-params-tab:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); }
+.gen-params-tab.active { background: color-mix(in srgb, var(--fg) 10%, transparent); color: var(--fg); }
+.gen-params-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 2px 2px 4px;
+}
+.gen-params-section-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.5;
+  margin: 6px 0 -2px;
+}
+.gen-params-hint {
+  font-size: 10px;
+  opacity: 0.55;
+  line-height: 1.4;
+}
+.gen-params-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.gen-params-row .settings-label {
+  min-width: 78px;
+  flex-shrink: 0;
+}
+.gen-params-lora-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+.gen-params-lora-row .gen-params-lora-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gen-params-lora-row input[type="range"] { width: 72px; }
+.gen-params-lora-row .gen-params-lora-weight {
+  width: 30px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+/* DEFECT 1: a registry entry ComfyUI's live LoraLoaderModelOnly list can't
+   currently resolve (nested-path comfy_name, pre-restart ComfyUI — see
+   src/comfy_graphs.py's resolve_lora_entries()) — greyed out, checkbox+
+   slider disabled, explanatory title tooltip on the row itself. */
+.gen-params-lora-row.gen-params-lora-unavailable { opacity: 0.5; }
+.gen-params-lora-row.gen-params-lora-unavailable .gen-params-lora-name { cursor: help; }
+.gen-params-badge {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.gen-params-badge-live { background: color-mix(in srgb, #4caf50 25%, transparent); color: #4caf50; }
+.gen-params-badge-keep { background: color-mix(in srgb, #64b5f6 22%, transparent); color: #64b5f6; }
+.gen-params-badge-superseded,
+.gen-params-badge-bad,
+.gen-params-badge-dead {
+  background: color-mix(in srgb, var(--fg) 15%, transparent);
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+}
+.gen-params-badge-unavailable { background: color-mix(in srgb, #ff9800 22%, transparent); color: #ff9800; }
+.gen-params-imgrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.gen-params-imgrow button { flex-shrink: 0; }
+.gen-params-thumb {
+  max-width: 100%;
+  max-height: 120px;
+  border-radius: 6px;
+  display: block;
+  margin-top: 6px;
+}
+.gen-params-section[hidden] { display: none; }
+
+/* ── In-bubble generation progress (mounted inside the pending assistant
+   message by genParams.js). Bar itself reuses the generalised .progress-bar
+   / .progress-fill classes above; this is the new part — the label/elapsed/
+   cancel row and its chat-bubble mount, which has no existing precedent. ── */
+.gen-progress { margin-top: 4px; }
+.gen-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  opacity: 0.85;
+  margin-bottom: 4px;
+}
+.gen-progress-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gen-progress-elapsed {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+.gen-progress-cancel {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 10px;
+  padding: 2px 8px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, border-color 0.15s;
+}
+.gen-progress-cancel:hover {
+  background: color-mix(in srgb, var(--red, #ef4444) 15%, transparent);
+  border-color: var(--red, #ef4444);
+}
+.gen-progress-error {
+  color: var(--red, #ef4444);
+  font-size: 11px;
+  margin-top: 4px;
+}
+
+/* DEFECT 2 — "Pick from Gallery" modal for the input-image control (image
+   img2img source / video start frame). Mirrors .vision-editor-overlay /
+   .vision-editor-panel's established full-viewport-overlay + centered-panel
+   pattern (style.css ~18701) rather than inventing a new modal shape. */
+.gen-params-gallery-overlay {
+  position: fixed; inset: 0; z-index: 9999;
+  background: rgba(0,0,0,0.55);
+  display: flex; align-items: center; justify-content: center;
+  padding: 16px;
+}
+.gen-params-gallery-modal {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  width: min(560px, 92vw);
+  max-height: 82vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 14px 40px rgba(0,0,0,0.4);
+  overflow: hidden;
+}
+.gen-params-gallery-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  flex-shrink: 0;
+}
+.gen-params-gallery-close {
+  background: none;
+  border: none;
+  color: var(--fg);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.6;
+  padding: 2px 4px;
+}
+.gen-params-gallery-close:hover { opacity: 1; }
+.gen-params-gallery-modal-body {
+  padding: 12px 14px;
+  overflow-y: auto;
+}
+.gen-params-gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 8px;
+}
+.gen-params-gallery-item {
+  padding: 0;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  cursor: pointer;
+  background: var(--panel);
+  aspect-ratio: 1 / 1;
+  transition: border-color 0.15s, transform 0.1s;
+}
+.gen-params-gallery-item:hover {
+  border-color: var(--accent-primary, var(--red));
+  transform: scale(1.03);
+}
+.gen-params-gallery-item img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* Generated video bubbles (Video tab results) — mirrors .generated-image. */
+.msg.generated-video-wrap .body { text-align: center; }
+.generated-video {
+  max-width: 100%;
+  max-height: 512px;
+  border-radius: 8px;
+  display: inline-block;
+  margin: 0 auto;
 }

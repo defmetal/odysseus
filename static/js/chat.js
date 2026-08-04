@@ -23,6 +23,7 @@ import slashCommands, { initSlashCommands, isCommand, handleSlashCommand, handle
 import createResearchSynapse from './researchSynapse.js';
 import { createStreamRenderer } from './streamingRenderer.js';
 import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArrowUpRecall.js?v=20260714promptrecall';
+import genParamsModule from './genParams.js';
 
   const RESEARCH_TIMEOUT_MS = 360000;
   const DEFAULT_TIMEOUT_MS = 120000;
@@ -1319,6 +1320,29 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
       }
     }
 
+    // --- Image / Video modes: hand off to the ComfyUI-backed generator
+    // instead of the agent/chat pipeline below. Branches BEFORE any
+    // chat_stream-specific setup (submit-button/streaming state, Web Lock,
+    // SSE accumulation) because a Comfy job is a decoupled background job
+    // tracked in its own chat-bubble progress bar, not a chat stream — see
+    // static/js/genParams.js. This bypass is load-bearing, not cosmetic: per
+    // PLAN-IMAGE-VIDEO-TABS.md §9 risk 2, chat_routes.py's
+    // looks_like_image_generation_model() now trips an *implicit*
+    // image-generation path on model name alone (z-image/flux/sdxl/etc.), so
+    // Image/Video mode must never reach /api/chat_stream at all.
+    const _genMode = Storage.loadToggleState().mode;
+    if (_genMode === 'image' || _genMode === 'video') {
+      el('message').value = '';
+      if (window._syncModelPickerAutohide) window._syncModelPickerAutohide();
+      if (uiModule.autoResize) uiModule.autoResize(el('message'));
+      const _genSessionId = sessionModule.getCurrentSessionId();
+      genParamsModule.generate(_genMode, msg.trim(), _genSessionId).catch(err => {
+        console.error('[genParams] generate failed:', err);
+        uiModule.showToast('Generation failed to start: ' + (err && err.message || 'error'));
+      });
+      _releaseSendFlag();
+      return;
+    }
 
     const messageInput = el('message');
     const originalBtnText = submitBtn ? submitBtn.innerHTML : '';
