@@ -526,14 +526,46 @@ _JOB_MAX_AGE_SECONDS = 30 * 60
 
 
 def _prune_old_jobs(*, now: Optional[float] = None) -> None:
+    """Evict terminal jobs from the in-memory _JOBS dict.
+
+    Age is measured from `finished_at`, NOT `started_at`. That distinction is
+    the whole bug this docstring exists to prevent recurring:
+
+    _prune_old_jobs() runs in _run_job()'s `finally`, i.e. the instant a job
+    reaches a terminal state. Measuring from `started_at` meant any render
+    that took longer than _JOB_MAX_AGE_SECONDS was ALREADY "stale" the moment
+    it succeeded, so it was deleted in the same breath as being marked done.
+    GET /stream's 1 s poller then read _JOBS.get(job_id) -> None and emitted
+    `error: Job not found` instead of `done`.
+
+    Observed live 2026-08-07 on a MiniMax H3 video (renders run many minutes,
+    easily past the 30 min TTL at 1344x768): the mp4 landed in the Gallery and
+    both chat turns were written to the DB, but the UI showed no completion at
+    all, because the SSE stream errored instead of delivering `done` -- so the
+    frontend's _onJobDone() never ran and never painted the result bubble.
+
+    Measuring from `finished_at` means the retention window is "30 minutes to
+    collect your result", independent of how long the render itself took,
+    which is what the TTL was always meant to express.
+    """
     now = now if now is not None else time.time()
     stale = [
         jid for jid, j in _JOBS.items()
         if j.get("status") in ("done", "error", "cancelled")
-        and (now - float(j.get("started_at") or 0)) > _JOB_MAX_AGE_SECONDS
+        # Fall back to `now` (never `0`) when finished_at is somehow unset, so
+        # a missing timestamp keeps the job rather than instantly dropping it.
+        and (now - float(j.get("finished_at") or now)) > _JOB_MAX_AGE_SECONDS
     ]
     for jid in stale:
         _JOBS.pop(jid, None)
+
+
+def _mark_finished(job: dict) -> None:
+    """Stamp the terminal-state time exactly once, for _prune_old_jobs()'s
+    retention window. Idempotent: a job that reaches `finally` after already
+    being cancelled keeps its original finish time."""
+    if not job.get("finished_at"):
+        job["finished_at"] = time.time()
 
 
 def _apply_progress_state(job: dict, data: dict) -> None:
@@ -730,6 +762,11 @@ async def _run_job(job_id: str, graph: dict, client_id: str) -> None:
             # blip fallback as the clean-disconnect branch above.
             await _finish_via_poll_or_error(job, job_id, client, e)
     finally:
+        # Stamp the finish time BEFORE anything that could prune, so this job's
+        # own 30 min retention window starts here rather than at started_at
+        # (see _prune_old_jobs' docstring -- a long render used to be pruned
+        # the instant it succeeded, killing its own `done` SSE event).
+        _mark_finished(job)
         job["_ready"].set()
         # DEFECT 16: plan section 9 risk 1's stated VRAM mitigation ("POST
         # :8188/free after each Comfy job") was never actually wired up
@@ -1567,6 +1604,10 @@ def setup_comfy_routes() -> APIRouter:
         if job.get("status") not in ("done", "error", "landing", "cancelled"):
             job["status"] = "cancelled"
             job["error"] = job.get("error") or "Cancelled by user"
+            # Same retention-window stamp as _run_job's finally. _run_job will
+            # also reach its finally shortly and call _mark_finished(), which
+            # is idempotent, so the earlier (cancel) time is the one kept.
+            _mark_finished(job)
             _write_terminal_turn(job)
         return {"ok": True}
 

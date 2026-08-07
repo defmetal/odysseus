@@ -1838,6 +1838,79 @@ def test_wan_preset_against_real_repo_video_registry_end_to_end():
     assert clip_node["inputs"]["type"] == "wan"
 
 
+# ---------------------------------------------------------------------------
+# _prune_old_jobs retention window (regression: a long render used to delete
+# its OWN job record the instant it succeeded, killing the `done` SSE event)
+# ---------------------------------------------------------------------------
+
+def _prune_fixture():
+    """Import the pruner without dragging in FastAPI: it only touches the
+    module-level _JOBS dict and time, so exec the two symbols we need out of
+    routes/comfy_routes.py's source rather than importing the module."""
+    import re as _re
+    src = (_REPO_ROOT / "routes" / "comfy_routes.py").read_text(encoding="utf-8")
+    import typing
+    ns = {"time": __import__("time"), "Optional": typing.Optional, "logger": None}
+    ns["_JOBS"] = {}
+    ns["_JOB_MAX_AGE_SECONDS"] = 1800
+    for fn in ("_prune_old_jobs", "_mark_finished"):
+        m = _re.search(r"^def " + fn + r"\(.*?(?=^def |\Z)", src, _re.S | _re.M)
+        assert m, fn
+        exec(compile(m.group(0), "<prune>", "exec"), ns)
+    return ns
+
+
+def test_prune_keeps_a_long_render_that_just_finished():
+    """THE BUG: age was measured from started_at, so a render longer than the
+    TTL was already 'stale' the moment it completed and got evicted in the
+    same breath -- GET /stream then returned 'Job not found' instead of the
+    `done` event. Measured live on a MiniMax H3 video 2026-08-07."""
+    ns = _prune_fixture()
+    now = ns["time"].time()
+    ns["_JOBS"]["long"] = {
+        "status": "done",
+        "started_at": now - (60 * 60),   # started an HOUR ago
+        "finished_at": now,              # ...but finished just now
+    }
+    ns["_prune_old_jobs"](now=now)
+    assert "long" in ns["_JOBS"], "a just-finished long render must be retained"
+
+
+def test_prune_drops_a_job_finished_long_ago():
+    ns = _prune_fixture()
+    now = ns["time"].time()
+    ns["_JOBS"]["old"] = {"status": "done", "started_at": now - 9999, "finished_at": now - 3600}
+    ns["_prune_old_jobs"](now=now)
+    assert "old" not in ns["_JOBS"]
+
+
+def test_prune_never_drops_a_running_job():
+    ns = _prune_fixture()
+    now = ns["time"].time()
+    ns["_JOBS"]["run"] = {"status": "running", "started_at": now - 99999}
+    ns["_prune_old_jobs"](now=now)
+    assert "run" in ns["_JOBS"]
+
+
+def test_prune_missing_finished_at_is_kept_not_dropped():
+    """A missing timestamp must fall back to `now` (keep), never 0 (drop)."""
+    ns = _prune_fixture()
+    now = ns["time"].time()
+    ns["_JOBS"]["nofin"] = {"status": "done", "started_at": now - 99999}
+    ns["_prune_old_jobs"](now=now)
+    assert "nofin" in ns["_JOBS"]
+
+
+def test_mark_finished_is_idempotent():
+    ns = _prune_fixture()
+    job = {}
+    ns["_mark_finished"](job)
+    first = job["finished_at"]
+    ns["_mark_finished"](job)
+    assert job["finished_at"] == first
+
+
+
 def _run_all():
     tests = [(name, obj) for name, obj in sorted(globals().items())
              if name.startswith("test_") and callable(obj)]
