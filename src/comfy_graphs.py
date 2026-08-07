@@ -31,7 +31,7 @@ see routes/comfy_routes.py):
         "steps": int, "cfg": float,
         "sampler": str, "scheduler": str,
         "shift": float,
-        "unet": str, "clip": str, "vae": str,
+        "unet": str, "clip": str, "clip_type": str, "vae": str,
         "filename_prefix": str,
     }
 
@@ -98,6 +98,66 @@ two-stage advanced sampler) and no "batch"-affecting size preset beyond
 1). `build_wan_i2v_graph(params)` / `introspect_graph(...)["params"]`
 round-trip this shape the same way the image pair does -- see
 tests/test_comfy_graphs.py's video round-trip test.
+------------------------------------------------------------------------------
+
+-- Canonical MiniMax H3 video params dict (build_minimax_h3_graph) ----------
+A THIRD, deliberately SMALLER video shape -- H3 is structurally not a
+KSampler(Advanced) pipeline at all (see build_minimax_h3_graph()'s own header
+comment), so this reuses only the keys that genuinely still apply:
+
+    {
+        "prompt": str,                   # goes straight into
+                                          # MiniMaxH3ImageToVideo as a STRING
+                                          # -- there is no CLIPTextEncode in
+                                          # this graph at all, so unlike the
+                                          # other two shapes there is no
+                                          # "negative_prompt" key here (never
+                                          # read -- H3's BasicGuider is
+                                          # unguided/CFG-free, so there is no
+                                          # "cfg" key either).
+        "input_image": str | None,       # FIRST frame -- same key/shape as
+                                          # the other two builders' own start
+                                          # frame (comfy_image_ref() via
+                                          # input_image_subfolder/_type), so
+                                          # routes/comfy_routes.py's existing
+                                          # upload/gallery-passthrough bridge
+                                          # needs no H3-specific change.
+        "last_frame": str | None,        # OPTIONAL end frame -- a SECOND,
+                                          # independent image slot (same
+                                          # comfy_image_ref() shape via
+                                          # "last_frame_subfolder"/"_type").
+        "seconds": float,                # duration -- converted to
+                                          # MiniMaxH3ImageToVideo's `length`
+                                          # (raw frame count) via _h3_length().
+        "width": int, "height": int,
+        "fps": int | float,              # CreateVideo "fps" (24, not Wan's 16)
+        "seed": int | None, "randomize_seed": bool,
+        "steps": int,                    # BasicScheduler "steps"
+        "sampler": str,                  # KSamplerSelect "sampler_name"
+        "scheduler": str,                # BasicScheduler "scheduler"
+        "shift_video": float, "shift_audio": float,
+                                          # MiniMaxH3SigmaShift's two floats.
+                                          # That node is OMITTED from the
+                                          # graph entirely unless at least one
+                                          # of these differs from its own
+                                          # default (12.0 / 3.0) -- see
+                                          # build_minimax_h3_graph().
+        "unet": str, "clip": str,        # same keys the other two builders
+        "vae": str,                      # use (vae = the VIDEO vae here).
+        "audio_vae": str,                # the SECOND, audio VAELoader --
+                                          # H3's headline feature is
+                                          # synchronized audio generated in
+                                          # the SAME pass; there is no
+                                          # "no audio" mode for this graph,
+                                          # so unlike "vae" this has no
+                                          # meaningful use anywhere else.
+        "filename_prefix": str,
+    }
+
+`build_minimax_h3_graph(params)` / `introspect_graph(...)["params"]`
+round-trip this shape too (introspect_graph() gained a dedicated branch for
+H3's SamplerCustomAdvanced chain -- see that function's own comments) -- see
+tests/test_comfy_graphs.py's H3 round-trip test.
 ------------------------------------------------------------------------------
 """
 
@@ -228,8 +288,16 @@ def build_image_graph(params: dict) -> dict:
     happen.
     """
     prompt = str(params.get("prompt") or "")
+    # None == "caller said nothing" -> fall back to the studio anti-text
+    # negative. "" == "caller explicitly wants NO negative prompt" -> honour it.
+    # These are deliberately NOT the same. Collapsing them (the original
+    # behaviour) forced the anti-text negative onto every render, including the
+    # general-purpose presets in models.json whose defaults set it to "".
+    # That is actively harmful for Qwen-Image, whose headline strength is
+    # rendering readable text -- suppressing "text, letters, lettering" is the
+    # exact opposite of what you'd want from it.
     negative_prompt = params.get("negative_prompt")
-    negative_prompt = str(negative_prompt) if negative_prompt not in (None, "") else DEFAULT_NEGATIVE_PROMPT
+    negative_prompt = DEFAULT_NEGATIVE_PROMPT if negative_prompt is None else str(negative_prompt)
 
     loras = params.get("loras") or []
     for i, lora in enumerate(loras):
@@ -266,6 +334,11 @@ def build_image_graph(params: dict) -> dict:
 
     unet = str(params.get("unet") or DEFAULT_UNET)
     clip = str(params.get("clip") or DEFAULT_CLIP)
+    # Model-preset registry key (data/studio/scripts/models.json): "lumina2"
+    # for Z-Image, "qwen_image" for Qwen-Image. NOT a cosmetic default --
+    # getting this wrong silently produces garbage (models.json's own
+    # _comment), so it must be a real per-request field, not hardcoded.
+    clip_type = str(params.get("clip_type") or DEFAULT_CLIP_TYPE)
     vae = str(params.get("vae") or DEFAULT_VAE)
     filename_prefix = str(params.get("filename_prefix") or DEFAULT_FILENAME_PREFIX)
 
@@ -301,7 +374,7 @@ def build_image_graph(params: dict) -> dict:
     clip_id = nid()
     graph[clip_id] = {
         "class_type": "CLIPLoader",
-        "inputs": {"clip_name": clip, "type": DEFAULT_CLIP_TYPE, "device": DEFAULT_CLIP_DEVICE},
+        "inputs": {"clip_name": clip, "type": clip_type, "device": DEFAULT_CLIP_DEVICE},
     }
     clip_link = [clip_id, 0]
 
@@ -756,7 +829,310 @@ def build_wan_i2v_graph(params: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# C. introspect_graph
+# C. build_minimax_h3_graph -- MiniMax H3 (omni-modal video + synchronized
+#    audio). Every node shape/default below comes from a LIVE /object_info
+#    dump against a running ComfyUI 0.30.1 plus ComfyUI's own bundled
+#    template "video_minimax_h3_i2v.json" ("Image to Video (MiniMax H3)"
+#    subgraph, read in full) -- not re-derived or guessed here. See
+#    data/studio/PLAN-IMAGE-VIDEO-TABS.md sections 14.11/14.13 for the model files
+#    chosen and why (fl2va pruned-INT8 + nvfp4 text encoder, ~42.5GB); the
+#    exact graph wiring below is from that separate live-introspection pass,
+#    which supersedes any node list in the plan doc itself.
+#
+# Structurally NOT a KSampler/KSamplerAdvanced pipeline like the two builders
+# above -- H3 uses ComfyUI's "custom sampler" node family (BasicGuider /
+# RandomNoise / KSamplerSelect / BasicScheduler / SamplerCustomAdvanced), and
+# the prompt goes straight into MiniMaxH3ImageToVideo as a STRING. Two
+# load-bearing differences from every other builder in this module, both
+# deliberate, verified against the template, not omissions:
+#   - NO negative prompt, NO cfg anywhere -- BasicGuider is unguided/CFG-free.
+#     params["negative_prompt"] / params["cfg"] are never read by this
+#     function, and neither key (nor a "negative" CONDITIONING input) ever
+#     appears in the built graph.
+#   - TWO VAEs, both REQUIRED (video + audio) -- H3 generates synchronized
+#     audio in the SAME pass; dropping the audio VAE silently loses the
+#     audio track, which is H3's headline feature over Wan.
+# ---------------------------------------------------------------------------
+
+DEFAULT_H3_UNET = "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+DEFAULT_H3_UNET_WEIGHT_DTYPE = "default"
+DEFAULT_H3_CLIP = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+DEFAULT_H3_CLIP_TYPE = "minimax"  # NOT "lumina2"/"qwen_image"/"wan" -- a distinct, verified live CLIPLoader "type" combo value
+DEFAULT_H3_CLIP_DEVICE = "default"
+DEFAULT_H3_VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
+DEFAULT_H3_AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
+DEFAULT_H3_WIDTH = 1344
+DEFAULT_H3_HEIGHT = 768
+DEFAULT_H3_SECONDS = 2.0  # -> _h3_length() = 56; matches data/studio/scripts/models.json's minimax_h3 preset default
+DEFAULT_H3_FPS = 24.0
+DEFAULT_H3_STEPS = 20
+DEFAULT_H3_SAMPLER = "res_multistep"
+DEFAULT_H3_SCHEDULER = "simple"
+DEFAULT_H3_SHIFT_VIDEO = 12.0
+DEFAULT_H3_SHIFT_AUDIO = 3.0
+DEFAULT_H3_FILENAME_PREFIX = "video/MiniMax_H3"
+DEFAULT_H3_FORMAT = "auto"
+DEFAULT_H3_CODEC = "auto"
+
+
+def _h3_length(seconds: float) -> int:
+    """seconds -> MiniMax H3's `length` (frame count) input, satisfying the
+    mod-17 constraint ComfyUI's own bundled template computes
+    ("video_minimax_h3_i2v.json", "Image to Video (MiniMax H3)" subgraph) --
+    NOT something invented here. Frontend/model-preset callers work in
+    DURATION (seconds), not a raw frame count, so this is the one place that
+    conversion happens -- mirroring how _wan_step_split() above is the one
+    place a single "total steps" value gets split across Wan's two sampler
+    stages.
+
+        L = max(5, round(seconds * 24))     # requested frames @ 24fps, floored at 5
+        length = L + ((5 - (L % 17)) % 17)  # round UP to the next L % 17 == 5
+
+    Verified against the template's own worked example: seconds=2 -> L=48 ->
+    48 % 17 == 14 -> (5 - 14) % 17 == 8 -> length=56. The resulting `length`
+    always satisfies `length % 17 == 5` for ANY non-negative `L` -- a plain
+    modular-arithmetic identity of the formula itself, not something that
+    depends on round()'s tie-breaking rule.
+    """
+    L = max(5, round(seconds * 24))
+    return L + ((5 - (L % 17)) % 17)
+
+
+def build_minimax_h3_graph(params: dict) -> dict:
+    """Build a ComfyUI API-format graph for MiniMax H3 image-to-video (task
+    spec's "THE AUTHORITATIVE GRAPH", dumped from ComfyUI's own bundled
+    template) from a plain params dict (see the module docstring's
+    "Canonical MiniMax H3 video params dict" section for the shape). Reuses
+    as many keys/shapes from the image/Wan params dicts as apply -- `prompt`,
+    `input_image` (+ `_subfolder`/`_type`, the FIRST frame -- same key
+    build_image_graph() and build_wan_i2v_graph() already use for their own
+    single start-frame slot, so routes/comfy_routes.py's existing upload/
+    gallery-passthrough bridge (_resolve_input_image()) needs no H3-specific
+    change), `seed`, `randomize_seed`, `width`, `height`, `fps`,
+    `filename_prefix`, `unet`, `clip`, `vae` mean exactly what they mean
+    elsewhere. What's new:
+
+      "last_frame" (+ "_subfolder"/"_type")
+                                        -- OPTIONAL end frame, same
+                                           comfy_image_ref() shape as
+                                           input_image but a SECOND,
+                                           independent LoadImage node (H3's
+                                           MiniMaxH3ImageToVideo takes both
+                                           first_frame and last_frame as
+                                           separate optional IMAGE inputs --
+                                           neither is required, so a
+                                           text-only call with neither is
+                                           still valid, same "every field has
+                                           a default" contract as the other
+                                           two builders).
+      "seconds"                        -- duration; converted to the
+                                           `length` frame count via
+                                           _h3_length() (task spec: expose
+                                           DURATION IN SECONDS, not a raw
+                                           frame count).
+      "audio_vae"                      -- the SECOND VAELoader (the video
+                                           vae is the existing "vae" key).
+                                           Both are REQUIRED -- there is no
+                                           "no audio" mode for this graph.
+      "shift_video" / "shift_audio"    -- MiniMaxH3SigmaShift's two floats.
+                                           The node is OMITTED entirely
+                                           (UNETLoader feeds BasicGuider and
+                                           BasicScheduler directly) UNLESS at
+                                           least one differs from its own
+                                           default (12.0 / 3.0) -- verified:
+                                           "MiniMaxH3SigmaShift is NOT in the
+                                           [authoritative] template."
+
+    Deliberately does NOT read params["negative_prompt"] or params["cfg"] --
+    this pipeline structurally has neither (see the section header comment
+    above). Deliberately does NOT call apply_style_trigger() and offers no
+    LoRA stack at all -- like Wan, H3 has no knowledge of the studio style/
+    character LoRAs, and unlike Wan it has no LoRA slot whatsoever (no
+    LoraLoaderModelOnly anywhere in the authoritative template).
+
+    Pure function: no I/O, no network, no randomness unless the caller asks
+    for a random seed (params["randomize_seed"] truthy, or no seed given) --
+    same seed-resolution contract as the other two builders.
+    """
+    prompt = str(params.get("prompt") or "")
+
+    input_image = params.get("input_image") or None
+    input_image_subfolder = str(params.get("input_image_subfolder") or "")
+    input_image_type = str(params.get("input_image_type") or "input")
+
+    last_frame = params.get("last_frame") or None
+    last_frame_subfolder = str(params.get("last_frame_subfolder") or "")
+    last_frame_type = str(params.get("last_frame_type") or "input")
+
+    width = int(params.get("width") or DEFAULT_H3_WIDTH)
+    height = int(params.get("height") or DEFAULT_H3_HEIGHT)
+    seconds = params.get("seconds")
+    seconds = float(seconds) if seconds is not None else DEFAULT_H3_SECONDS
+    length = _h3_length(seconds)
+
+    fps = params.get("fps")
+    fps = float(fps) if fps is not None else DEFAULT_H3_FPS
+
+    seed = params.get("seed")
+    if params.get("randomize_seed") or seed is None:
+        seed = random.randint(0, _SEED_MAX)
+    else:
+        seed = int(seed)
+
+    steps = int(params.get("steps") or DEFAULT_H3_STEPS)
+    sampler = str(params.get("sampler") or DEFAULT_H3_SAMPLER)
+    scheduler = str(params.get("scheduler") or DEFAULT_H3_SCHEDULER)
+
+    # MiniMaxH3SigmaShift is inserted ONLY when the caller's value differs
+    # from the node's own default -- "UNETLoader feeds BasicGuider and
+    # BasicScheduler directly" in the authoritative (no-override) template.
+    shift_video_in = params.get("shift_video")
+    shift_audio_in = params.get("shift_audio")
+    needs_sigma_shift = (
+        (shift_video_in is not None and float(shift_video_in) != DEFAULT_H3_SHIFT_VIDEO)
+        or (shift_audio_in is not None and float(shift_audio_in) != DEFAULT_H3_SHIFT_AUDIO)
+    )
+    shift_video = float(shift_video_in) if shift_video_in is not None else DEFAULT_H3_SHIFT_VIDEO
+    shift_audio = float(shift_audio_in) if shift_audio_in is not None else DEFAULT_H3_SHIFT_AUDIO
+
+    unet = str(params.get("unet") or DEFAULT_H3_UNET)
+    clip = str(params.get("clip") or DEFAULT_H3_CLIP)
+    video_vae = str(params.get("vae") or DEFAULT_H3_VIDEO_VAE)
+    audio_vae = str(params.get("audio_vae") or DEFAULT_H3_AUDIO_VAE)
+    filename_prefix = str(params.get("filename_prefix") or DEFAULT_H3_FILENAME_PREFIX)
+
+    nid = _new_id_gen()
+    graph: dict[str, Any] = {}
+
+    unet_id = nid()
+    graph[unet_id] = {
+        "class_type": "UNETLoader",
+        "inputs": {"unet_name": unet, "weight_dtype": DEFAULT_H3_UNET_WEIGHT_DTYPE},
+    }
+    model_link = [unet_id, 0]
+
+    if needs_sigma_shift:
+        shift_id = nid()
+        graph[shift_id] = {
+            "class_type": "MiniMaxH3SigmaShift",
+            "inputs": {"model": model_link, "shift_video": shift_video, "shift_audio": shift_audio},
+        }
+        model_link = [shift_id, 0]
+
+    clip_id = nid()
+    graph[clip_id] = {
+        "class_type": "CLIPLoader",
+        "inputs": {"clip_name": clip, "type": DEFAULT_H3_CLIP_TYPE, "device": DEFAULT_H3_CLIP_DEVICE},
+    }
+    clip_link = [clip_id, 0]
+
+    # Video VAE MUST be created before the audio one -- introspect_graph()
+    # relies on VAELoader insertion order to tell them apart (vae_ids[0] ==
+    # video, vae_ids[1] == audio), the SAME convention build_wan_i2v_graph()
+    # already established for its two UNETLoaders (unet_ids[0]==high/primary,
+    # [1]==low).
+    video_vae_id = nid()
+    graph[video_vae_id] = {"class_type": "VAELoader", "inputs": {"vae_name": video_vae}}
+    video_vae_link = [video_vae_id, 0]
+
+    audio_vae_id = nid()
+    graph[audio_vae_id] = {"class_type": "VAELoader", "inputs": {"vae_name": audio_vae}}
+    audio_vae_link = [audio_vae_id, 0]
+
+    h3_inputs: dict[str, Any] = {
+        "clip": clip_link,
+        "vae": video_vae_link,
+        "prompt": prompt,
+        "width": width,
+        "height": height,
+        "length": length,
+    }
+    if input_image:
+        first_load_id = nid()
+        graph[first_load_id] = {
+            "class_type": "LoadImage",
+            "inputs": {"image": comfy_image_ref(input_image, input_image_subfolder, input_image_type)},
+        }
+        h3_inputs["first_frame"] = [first_load_id, 0]
+    if last_frame:
+        last_load_id = nid()
+        graph[last_load_id] = {
+            "class_type": "LoadImage",
+            "inputs": {"image": comfy_image_ref(last_frame, last_frame_subfolder, last_frame_type)},
+        }
+        h3_inputs["last_frame"] = [last_load_id, 0]
+
+    h3_id = nid()
+    graph[h3_id] = {"class_type": "MiniMaxH3ImageToVideo", "inputs": h3_inputs}
+    # (CONDITIONING, LATENT) -- verified output order (task spec).
+    h3_conditioning, h3_latent = [h3_id, 0], [h3_id, 1]
+
+    guider_id = nid()
+    graph[guider_id] = {
+        "class_type": "BasicGuider",
+        "inputs": {"model": model_link, "conditioning": h3_conditioning},
+    }
+
+    noise_id = nid()
+    graph[noise_id] = {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}}
+
+    sampler_sel_id = nid()
+    graph[sampler_sel_id] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": sampler}}
+
+    scheduler_id = nid()
+    graph[scheduler_id] = {
+        "class_type": "BasicScheduler",
+        # denoise is always 1.0 -- the authoritative template's own literal
+        # value, not something exposed as a param (H3 is guided by
+        # conditioning, not a partial-noise img2img-style denoise).
+        "inputs": {"model": model_link, "scheduler": scheduler, "steps": steps, "denoise": 1.0},
+    }
+
+    adv_id = nid()
+    graph[adv_id] = {
+        "class_type": "SamplerCustomAdvanced",
+        "inputs": {
+            "noise": [noise_id, 0],
+            "guider": [guider_id, 0],
+            "sampler": [sampler_sel_id, 0],
+            "sigmas": [scheduler_id, 0],
+            "latent_image": h3_latent,
+        },
+    }
+
+    decode_id = nid()
+    graph[decode_id] = {
+        "class_type": "VAEDecode",
+        "inputs": {"samples": [adv_id, 0], "vae": video_vae_link},
+    }
+    decode_audio_id = nid()
+    graph[decode_audio_id] = {
+        "class_type": "VAEDecodeAudio",
+        "inputs": {"samples": [adv_id, 0], "vae": audio_vae_link},
+    }
+
+    video_id = nid()
+    graph[video_id] = {
+        "class_type": "CreateVideo",
+        "inputs": {"images": [decode_id, 0], "audio": [decode_audio_id, 0], "fps": fps},
+    }
+
+    save_id = nid()
+    graph[save_id] = {
+        "class_type": "SaveVideo",
+        "inputs": {
+            "video": [video_id, 0],
+            "filename_prefix": filename_prefix,
+            "format": DEFAULT_H3_FORMAT,
+            "codec": DEFAULT_H3_CODEC,
+        },
+    }
+
+    return graph
+
+
+# ---------------------------------------------------------------------------
+# D. introspect_graph
 # ---------------------------------------------------------------------------
 
 # Node types this module understands well enough to map to panel controls
@@ -781,6 +1157,10 @@ _KNOWN_CLASS_TYPES = {
     "KSampler", "VAELoader", "VAEDecode", "SaveImage",
     # Video (verified -- see note above):
     "KSamplerAdvanced", "WanImageToVideo", "CreateVideo", "SaveVideo", "ModelSamplingSD3",
+    # MiniMax H3 (build_minimax_h3_graph()) -- its own "custom sampler" node
+    # family, entirely distinct from KSampler(Advanced).
+    "MiniMaxH3ImageToVideo", "BasicGuider", "RandomNoise", "KSamplerSelect",
+    "BasicScheduler", "SamplerCustomAdvanced", "VAEDecodeAudio", "MiniMaxH3SigmaShift",
 }
 
 _SAMPLER_CLASS_TYPES = ("KSampler", "KSamplerAdvanced")
@@ -864,6 +1244,13 @@ def introspect_graph(api_graph: dict) -> dict:
             break
 
     positive_text = negative_text = ""
+    # DEFECT 19: H3 has no negative-prompt concept at all (module docstring;
+    # BasicGuider is unguided/CFG-free) -- set True in the H3 branch below so
+    # the final params["negative_prompt"] assignment can be skipped entirely
+    # for it, rather than always emitting "" (which contradicts this
+    # module's own docstring and looks like a real, empty-but-present
+    # negative prompt to a caller).
+    h3_no_negative = False
     if sampler_node is not None:
         s_in = sampler_node.get("inputs", {})
         pos_ref = s_in.get("positive")
@@ -885,8 +1272,47 @@ def introspect_graph(api_graph: dict) -> dict:
         # is never read here.
         params["seed"] = s_in.get("seed", s_in.get("noise_seed"))
 
+    elif by_type.get("SamplerCustomAdvanced"):
+        h3_no_negative = True
+        # MiniMax H3's CFG-free custom-sampler chain (build_minimax_h3_graph())
+        # -- no single node carries steps/cfg/seed/prompt together the way
+        # KSampler(Advanced) does; each lives on a DISTINCT upstream node,
+        # reached by following SamplerCustomAdvanced's own typed inputs
+        # (noise/sampler/sigmas/guider). Deliberately sets NO "cfg" and NO
+        # "denoise" key at all here (left absent, not None/0) -- H3
+        # structurally has neither (BasicGuider is unguided/CFG-free; see
+        # build_minimax_h3_graph()'s header comment).
+        adv_in = nodes[by_type["SamplerCustomAdvanced"][0]].get("inputs", {})
+
+        noise_ref = adv_in.get("noise")
+        if isinstance(noise_ref, list) and noise_ref and noise_ref[0] in nodes:
+            params["seed"] = nodes[noise_ref[0]].get("inputs", {}).get("noise_seed")
+
+        sampler_ref = adv_in.get("sampler")
+        if isinstance(sampler_ref, list) and sampler_ref and sampler_ref[0] in nodes:
+            params["sampler"] = nodes[sampler_ref[0]].get("inputs", {}).get("sampler_name")
+
+        sigmas_ref = adv_in.get("sigmas")
+        if isinstance(sigmas_ref, list) and sigmas_ref and sigmas_ref[0] in nodes:
+            sched_in = nodes[sigmas_ref[0]].get("inputs", {})
+            params["scheduler"] = sched_in.get("scheduler")
+            params["steps"] = sched_in.get("steps")
+
+        # Positive prompt: BasicGuider.conditioning -> MiniMaxH3ImageToVideo's
+        # OWN "prompt" STRING input -- NOT a CLIPTextEncode chase (H3 has no
+        # CLIPTextEncode at all), so _resolve_conditioning_text() (which only
+        # knows how to find a "text" field) does not apply here.
+        guider_ref = adv_in.get("guider")
+        if isinstance(guider_ref, list) and guider_ref and guider_ref[0] in nodes:
+            cond_ref = nodes[guider_ref[0]].get("inputs", {}).get("conditioning")
+            if isinstance(cond_ref, list) and cond_ref and cond_ref[0] in nodes:
+                h3_node = nodes[cond_ref[0]]
+                if h3_node.get("class_type") == "MiniMaxH3ImageToVideo":
+                    positive_text = str(h3_node.get("inputs", {}).get("prompt") or "")
+
     params["prompt"] = positive_text
-    params["negative_prompt"] = negative_text
+    if not h3_no_negative:
+        params["negative_prompt"] = negative_text
 
     # --- LoRA chain(s): walk the `model` link forward from EVERY UNETLoader ---
     # (not just the first). The image graph only ever has one UNETLoader, so
@@ -937,11 +1363,24 @@ def introspect_graph(api_graph: dict) -> dict:
     # --- CLIP / VAE loaders ---
     clip_ids = by_type.get("CLIPLoader") or []
     if clip_ids:
-        params["clip"] = nodes[clip_ids[0]].get("inputs", {}).get("clip_name")
+        clip_inputs = nodes[clip_ids[0]].get("inputs", {})
+        params["clip"] = clip_inputs.get("clip_name")
+        # "type" is the CLIPLoader combo picking the text-encoder family
+        # ("lumina2" for Z-Image, "qwen_image" for Qwen-Image, "wan" for the
+        # video pipeline). Round-tripping it matters for the same reason
+        # build_image_graph() takes it as a real param now, not a hardcoded
+        # constant: getting it wrong silently produces garbage, not an error.
+        params["clip_type"] = clip_inputs.get("type")
 
     vae_ids = by_type.get("VAELoader") or []
     if vae_ids:
         params["vae"] = nodes[vae_ids[0]].get("inputs", {}).get("vae_name")
+        if len(vae_ids) > 1:
+            # MiniMax H3's second VAELoader (build_minimax_h3_graph()) is the
+            # AUDIO vae, inserted right after the video one -- same "surfaced
+            # under its own key so the single-VAE contract for every other
+            # graph is unchanged" pattern as unet/unet_low above.
+            params["audio_vae"] = nodes[vae_ids[1]].get("inputs", {}).get("vae_name")
 
     # --- latent source: txt2img vs img2img vs video ---
     if by_type.get("EmptySD3LatentImage"):
@@ -968,6 +1407,47 @@ def introspect_graph(api_graph: dict) -> dict:
         params["frames"] = wi.get("length")
         params["batch"] = wi.get("batch_size")
 
+    # MiniMax H3's own width/height/length + optional first/last frame --
+    # SAME "separate `if`, not `elif`" reasoning as WanImageToVideo above (a
+    # LoadImage for first_frame/last_frame must not shadow this via the
+    # earlier EmptySD3LatentImage/LoadImage elif chain).
+    if by_type.get("MiniMaxH3ImageToVideo"):
+        hi = nodes[by_type["MiniMaxH3ImageToVideo"][0]].get("inputs", {})
+        params["width"] = hi.get("width")
+        params["height"] = hi.get("height")
+        length = hi.get("length")
+        params["frames"] = length
+        # DEFECT 19: recover `seconds` (the duration a re-roll needs) from
+        # `length` -- _h3_length() rounds UP to satisfy H3's own mod-17
+        # constraint, so this is not a lossless inverse of "what the caller
+        # originally typed"; it's the actual, exact duration the graph will
+        # render (length / fps), which is the more honest value to hand back
+        # anyway. Reads the CreateVideo node's own fps directly (rather than
+        # relying on params["fps"], set later below) so this doesn't depend
+        # on this block's position relative to that one.
+        create_video_ids = by_type.get("CreateVideo") or []
+        fps_for_seconds = (
+            nodes[create_video_ids[0]].get("inputs", {}).get("fps") if create_video_ids else None
+        )
+        fps_for_seconds = float(fps_for_seconds) if fps_for_seconds else DEFAULT_H3_FPS
+        if isinstance(length, (int, float)):
+            params["seconds"] = length / fps_for_seconds
+        # DEFECT 11: with only last_frame set, the earlier EmptySD3LatentImage
+        # /LoadImage `elif` chain above (there being no EmptySD3LatentImage in
+        # an H3 graph) falls to `elif by_type.get("LoadImage")`, which grabs
+        # LoadImage[0] -- the ONLY LoadImage node when first_frame is absent,
+        # i.e. the END frame -- as `input_image`. Explicitly null it back out
+        # here when first_frame is genuinely absent, instead of leaving that
+        # wrong value in place.
+        first_ref = hi.get("first_frame")
+        if isinstance(first_ref, list) and first_ref and first_ref[0] in nodes:
+            params["input_image"] = nodes[first_ref[0]].get("inputs", {}).get("image")
+        else:
+            params["input_image"] = None
+        last_ref = hi.get("last_frame")
+        if isinstance(last_ref, list) and last_ref and last_ref[0] in nodes:
+            params["last_frame"] = nodes[last_ref[0]].get("inputs", {}).get("image")
+
     # --- output node ---
     save_ids = by_type.get("SaveImage") or []
     if save_ids:
@@ -985,7 +1465,7 @@ def introspect_graph(api_graph: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# D. ui_to_api
+# E. ui_to_api
 # ---------------------------------------------------------------------------
 
 # ComfyUI's frontend renders an extra "control_after_generate" combo widget
@@ -1053,8 +1533,10 @@ def ui_to_api(ui_graph: dict, object_info: dict) -> dict:
                 f"-- cannot determine its input schema."
             )
         node_input_spec = info.get("input") or {}
-        ordered_names = list((node_input_spec.get("required") or {}).keys()) + \
-            list((node_input_spec.get("optional") or {}).keys())
+        required_spec = node_input_spec.get("required") or {}
+        optional_spec = node_input_spec.get("optional") or {}
+        ordered_names = list(required_spec.keys()) + list(optional_spec.keys())
+        combined_spec = {**required_spec, **optional_spec}
 
         # Which declared input names does this node instance satisfy via a link?
         resolved_links: dict[str, list] = {}
@@ -1071,7 +1553,24 @@ def ui_to_api(ui_graph: dict, object_info: dict) -> dict:
             origin_id, origin_slot = link_index[link_id]
             resolved_links[name] = [origin_id, origin_slot]
 
-        widget_names = [n for n in ordered_names if n not in resolved_links]
+        # DEFECT 12: NOT every declared, non-linked input is a real widget --
+        # an IMAGE/CONDITIONING/CLIP_VISION_OUTPUT/... typed OPTIONAL input
+        # left disconnected (e.g. WanImageToVideo's clip_vision_output) has
+        # NO widgets_values entry at all (ComfyUI's own frontend never writes
+        # one for it), so treating it as positional over-counted the values
+        # needed and raised "ran out of widgets_values" on an otherwise
+        # perfectly normal export. Only a combo (spec type is a list) or a
+        # primitive widget type actually gets a widgets_values slot.
+        def _is_widget_input(name: str) -> bool:
+            spec = combined_spec.get(name)
+            if not isinstance(spec, (list, tuple)) or not spec:
+                return False
+            type_or_options = spec[0]
+            if isinstance(type_or_options, list):
+                return True  # combo dropdown
+            return type_or_options in ("INT", "FLOAT", "STRING", "BOOLEAN")
+
+        widget_names = [n for n in ordered_names if n not in resolved_links and _is_widget_input(n)]
         raw_values = list(node.get("widgets_values") or [])
         companion_after = _CONTROL_AFTER_GENERATE_COMPANION.get(class_type)
 
@@ -1108,7 +1607,7 @@ def ui_to_api(ui_graph: dict, object_info: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# E. apply_style_trigger -- the one function here that touches the filesystem
+# F. apply_style_trigger -- the one function here that touches the filesystem
 # ---------------------------------------------------------------------------
 
 # data/studio/scripts/styles.json lives two directories up from this file
@@ -1177,7 +1676,7 @@ def apply_style_trigger(prompt: str, style_hint: Optional[str] = None, *, regist
 
 
 # ---------------------------------------------------------------------------
-# F. filter_safetensors / resolve_lora_entries -- DEFECT 1 fix: registry
+# G. filter_safetensors / resolve_lora_entries -- DEFECT 1 fix: registry
 # comfy_name vs ComfyUI's LIVE LoraLoaderModelOnly list
 # ---------------------------------------------------------------------------
 #
@@ -1264,4 +1763,304 @@ def resolve_lora_entries(entries: Optional[list], live_names: Optional[list]) ->
             else:
                 resolved, available = None, False
         out.append({**entry_dict, "available": available, "resolved_name": resolved})
+    return out
+
+
+# ---------------------------------------------------------------------------
+# H. load_model_registry / resolve_model_entries / apply_model_preset --
+# data/studio/scripts/models.json: "which model" as ONE user-facing choice
+# ---------------------------------------------------------------------------
+#
+# models.json collapses unet+clip+clip_type+vae+loras+defaults into a single
+# named preset (its own _comment has the full schema/rationale) so the Image
+# tab becomes "pick a model, type a prompt, hit Generate" instead of eight
+# separate knobs. This section mirrors the styles.json (_load_style_registry)
+# and loras.json (resolve_lora_entries) patterns already in this module:
+# pure, stdlib-only, degrade-don't-raise on a missing/malformed file.
+
+_MODELS_REGISTRY_PATH = Path(__file__).resolve().parent.parent / "data" / "studio" / "scripts" / "models.json"
+
+# Used only if models.json is missing/malformed (e.g. a fresh clone -- data/
+# is gitignored per CLAUDE.md) so callers degrade instead of crashing. A
+# single safe, always-available preset: plain Z-Image, no LoRAs, no style
+# trigger -- the same shape as models.json's own "zimage_general" entry, but
+# built from this module's existing DEFAULT_* constants rather than
+# duplicating literals that could drift out of sync with build_image_graph().
+_FALLBACK_MODEL_REGISTRY = {
+    "default": "zimage_general",
+    "models": {
+        "zimage_general": {
+            "name": "Z-Image (base)",
+            "group": "General",
+            "description": "Plain Z-Image with no LoRAs and no style trigger.",
+            "arch": "z_image",
+            "unet": DEFAULT_UNET,
+            "clip": DEFAULT_CLIP,
+            "clip_type": DEFAULT_CLIP_TYPE,
+            "vae": DEFAULT_VAE,
+            "loras": [],
+            "style_trigger": False,
+            "characters_allowed": False,
+            "enabled": True,
+            "sizes": [f"{DEFAULT_WIDTH}x{DEFAULT_HEIGHT}"],
+            "defaults": {
+                "steps": DEFAULT_STEPS, "cfg": DEFAULT_CFG, "sampler": DEFAULT_SAMPLER,
+                "scheduler": DEFAULT_SCHEDULER, "shift": DEFAULT_SHIFT,
+                "size": f"{DEFAULT_WIDTH}x{DEFAULT_HEIGHT}", "negative_prompt": "",
+            },
+        },
+    },
+    # Video counterpart of the image fallback above -- same rationale: a
+    # single safe, always-available preset (Wan, not H3 -- H3's ~42.5GB of
+    # weights are far less likely to exist on a fresh clone/dev machine than
+    # Wan's, mirroring why "zimage_general" rather than "studio_toei" (needs
+    # a LoRA file) was chosen as the IMAGE fallback), built from this
+    # module's existing DEFAULT_WAN_* constants so it can't drift out of sync
+    # with build_wan_i2v_graph()'s own defaults.
+    "default_video_model": "wan22_i2v",
+    "video_models": {
+        "wan22_i2v": {
+            "name": "Wan 2.2 (I2V)",
+            "group": "Video",
+            "description": "Image-to-video, no audio.",
+            "engine": "wan22_i2v",
+            "unet": DEFAULT_WAN_UNET_HIGH,
+            "unet_low": DEFAULT_WAN_UNET_LOW,
+            "clip": DEFAULT_WAN_CLIP,
+            "clip_type": DEFAULT_WAN_CLIP_TYPE,
+            "vae": DEFAULT_WAN_VAE,
+            "has_audio": False,
+            "enabled": True,
+            "sizes": [f"{DEFAULT_WAN_WIDTH}x{DEFAULT_WAN_HEIGHT}"],
+            "defaults": {
+                "steps": DEFAULT_WAN_STEPS, "cfg": DEFAULT_WAN_CFG, "sampler": DEFAULT_WAN_SAMPLER,
+                "scheduler": DEFAULT_WAN_SCHEDULER, "shift": DEFAULT_WAN_SHIFT, "fps": DEFAULT_WAN_FPS,
+                "size": f"{DEFAULT_WAN_WIDTH}x{DEFAULT_WAN_HEIGHT}", "negative_prompt": DEFAULT_WAN_NEGATIVE_PROMPT,
+            },
+        },
+    },
+}
+
+
+def load_model_registry(path: Optional[str] = None) -> dict:
+    """Read data/studio/scripts/models.json -- the model-preset registry (see
+    that file's own _comment for the full per-entry schema). Mirrors
+    _load_style_registry()'s degradation contract exactly: a missing,
+    unreadable, or structurally malformed file (no dict, no non-empty
+    "models" dict) returns `_FALLBACK_MODEL_REGISTRY` instead of raising, so
+    every caller (routes/comfy_routes.py's /api/comfy/options and /generate)
+    always has at least one usable preset with no try/except of its own.
+    """
+    p = Path(path) if path else _MODELS_REGISTRY_PATH
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return _FALLBACK_MODEL_REGISTRY
+    if not isinstance(data, dict) or not isinstance(data.get("models"), dict) or not data.get("models"):
+        return _FALLBACK_MODEL_REGISTRY
+    return data
+
+
+def resolve_model_entries(entries: Optional[list], live: Optional[dict]) -> list[dict]:
+    """Add `available` (bool) and `missing` (list[str]) to each dict in
+    `entries` -- data/studio/scripts/models.json's preset rows, flattened to
+    a list the same way routes/comfy_routes.py's `_load_curated_loras()`
+    already flattens loras.json's dict-of-dicts into a list of entries each
+    carrying its own "key" (mirror that shape here: one entry per preset,
+    "key" = the models.json key, plus its unet/clip/vae/... fields verbatim).
+
+    `live` is `{"unets": [...], "clips": [...], "vaes": [...]}` -- exactly
+    ComfyUI's live UNETLoader.unet_name / CLIPLoader.clip_name /
+    VAELoader.vae_name combo lists (routes/comfy_routes.py already has
+    `_combo_options()` for pulling each of these out of a cached
+    /object_info response). LoRAs are deliberately NOT checked here -- a
+    preset's `loras` entries are `{"key": ..., "weight": ...}` referencing
+    loras.json, not a live comfy_name directly, and resolving THOSE is
+    apply_model_preset()'s + /api/comfy/generate's job (reusing
+    resolve_lora_entries()), not this function's.
+
+    For each of "unet"/"clip"/"vae" independently: the SAME exact ->
+    basename -> unresolved fallback resolve_lora_entries() already uses
+    (plan §14.6 -- ComfyUI reports bare filenames, registries/presets may
+    hold nested paths). A preset is `available` only when every field it
+    actually declares resolves; `missing` lists which of "unet"/"clip"/"vae"
+    did not (e.g. the Qwen preset, whose ~30GB download is in progress per
+    the task constraints, comes back `available: False, missing: ["unet",
+    "clip", "vae"]` today and flips to `available: True, missing: []` once
+    the files land AND ComfyUI is restarted to see them -- no code change
+    either side of that event). A preset field left blank/unset is not
+    treated as "missing" -- there is nothing to check.
+
+    ALSO checks "unet_low" (Wan's second, low-noise UNETLoader -- build_
+    wan_i2v_graph()) against the SAME "unets" live list, and "audio_vae"
+    (MiniMax H3's second VAELoader -- build_minimax_h3_graph()) against the
+    SAME "vaes" live list -- data/studio/scripts/models.json's `video_models`
+    section (task item 3: "resolved for availability the same way image
+    models are -- reuse resolve_model_entries"). An image preset never
+    declares either field, so this is purely additive for it (the "field
+    left blank/unset is not missing" rule above already covers "not
+    declared at all").
+
+    Pure function, no I/O -- returns NEW dicts (shallow copy + 2 added keys);
+    never mutates `entries`. `live=None` (or missing individual keys) means
+    nothing resolves for that slot, e.g. every preset with a non-empty field
+    comes back unavailable -- callers that can't currently reach ComfyUI
+    should NOT call this function at all and should instead degrade the same
+    way /api/comfy/options' existing loras handling does (pass every entry
+    through as available, since we cannot verify availability against a
+    server we can't reach -- ComfyUI being down is a different, already-
+    surfaced problem, see /api/comfy/status).
+    """
+    live = live or {}
+
+    def _resolves(name: str, live_names: Optional[list]) -> bool:
+        if not name:
+            return True  # nothing declared for this slot -- nothing to check
+        live_list = [str(n) for n in (live_names or [])]
+        if name in live_list:
+            return True
+        base = os.path.basename(name)
+        return any(os.path.basename(live_name) == base for live_name in live_list)
+
+    out = []
+    for entry in entries or []:
+        entry_dict = entry if isinstance(entry, dict) else {}
+        missing = [
+            field for field, live_key in (
+                ("unet", "unets"), ("clip", "clips"), ("vae", "vaes"),
+                ("unet_low", "unets"), ("audio_vae", "vaes"),
+            )
+            if not _resolves(str(entry_dict.get(field) or ""), live.get(live_key))
+        ]
+        out.append({**entry_dict, "available": not missing, "missing": missing})
+    return out
+
+
+# Preset `defaults.*` keys apply_model_preset() copies straight into params
+# under the SAME name when the caller hasn't already set that key. "size" is
+# handled separately below (it expands to two params keys, width/height).
+#
+# The last five (fps/frames/seconds/shift_video/shift_audio) are VIDEO-only
+# additions (task: reuse apply_model_preset() for data/studio/scripts/
+# models.json's new `video_models` section too, rather than writing a second
+# fill-function) -- purely additive: an IMAGE preset's `defaults` never
+# declares any of them, so `field in defaults` is False and nothing changes
+# for the image path. "cfg"/"shift"/"negative_prompt" are Wan-shaped (Wan
+# reuses the exact same keys build_image_graph() already does); "seconds"/
+# "shift_video"/"shift_audio" are H3-only; "fps" is shared by both video
+# engines (image has no such concept at all).
+_PRESET_DEFAULT_KEYS = (
+    "steps", "cfg", "sampler", "scheduler", "shift", "negative_prompt",
+    "fps", "frames", "seconds", "shift_video", "shift_audio",
+)
+
+
+def _parse_preset_size(size: Any) -> Optional[tuple[int, int]]:
+    """"1216x672" -> (1216, 672). None for anything that isn't exactly
+    WIDTHxHEIGHT of two ints -- defensive against a hand-edited models.json
+    typo (this module never raises on a malformed registry, per its other
+    degrade-not-crash functions)."""
+    if not isinstance(size, str) or "x" not in size:
+        return None
+    w_str, _, h_str = size.partition("x")
+    try:
+        return int(w_str), int(h_str)
+    except ValueError:
+        return None
+
+
+def apply_model_preset(params: Optional[dict], preset: Optional[dict]) -> dict:
+    """Return a NEW params dict with `preset`'s unet/clip/clip_type/vae/loras
+    and defaults filled in ONLY where `params` did not already specify a
+    value -- models.json's own _comment: "Advanced still exposes every
+    individual field, and any field a user overrides wins over the preset's
+    default." Never mutates `params` or `preset`.
+
+    Originally written for the IMAGE `models` registry section only; reused
+    as-is (no video-specific fork) for the `video_models` section added
+    alongside it -- `unet_low`/`audio_vae` (direct-copy fields) and
+    `fps`/`frames`/`seconds`/`shift_video`/`shift_audio` (_PRESET_DEFAULT_KEYS)
+    are video-only additions that are simply absent from every image preset's
+    own data, so this is a strict superset of the original behaviour, not a
+    behaviour change for the image path.
+
+    "Caller did not already specify a value" uses the same falsy-still-gets-
+    a-default contract build_image_graph() already applies throughout (e.g.
+    `params.get("steps") or DEFAULT_STEPS`) -- a key that's absent, None, or
+    "" all count as unset -- so this composes with that function rather than
+    inventing a second, stricter definition.
+
+    Fields filled from the preset, in order:
+      - unet / clip / clip_type / vae -- direct copy from the preset's own
+        top-level keys, when present on the preset and unset on `params`.
+      - loras -- the preset's OWN loras list (models.json's registry form,
+        `[{"key": ..., "weight": ...}, ...]` -- still KEYED, not yet
+        resolved to a comfy_name; that resolution is the caller's job,
+        exactly like loras.json's own registry rows are resolved elsewhere
+        via resolve_lora_entries() -- see routes/comfy_routes.py's
+        /api/comfy/generate). Filled only when `params["loras"]` is None
+        (DEFECT 7, 2026-08) -- routes/comfy_routes.py's GenerateParams.loras
+        is `Optional[List[LoraParam]] = None` specifically so an absent
+        field (None) and a deliberate empty selection (`[]`) are
+        distinguishable on the wire. An explicit `[]` now means "the caller
+        deliberately chose zero LoRAs" (the UI does let a user uncheck every
+        row) and is left alone, never refilled from the preset.
+      - defaults.steps / .cfg / .sampler / .scheduler / .shift /
+        .negative_prompt -- direct copy when that params key is unset.
+      - defaults.size -- parsed "WIDTHxHEIGHT" (_parse_preset_size()) and
+        expanded into `width`/`height` INDEPENDENTLY (each filled only when
+        THAT specific key is unset), so a caller who set width but not
+        height still gets the preset's height, not a silently mismatched
+        pair, and vice versa.
+
+    `preset=None`/`{}` returns an unmodified shallow copy of `params` (or
+    `{}` if `params` is also falsy) -- always safe to call even before a
+    model key has been resolved to a preset dict.
+    """
+    out = dict(params or {})
+    preset = preset or {}
+
+    def _unset(key: str) -> bool:
+        # DEFECT 1: "" must NOT count as unset for negative_prompt -- the
+        # frontend ALWAYS sends `model` (so this preset path is the default,
+        # not an edge case), and clearing the Negative box in Advanced sends
+        # negative_prompt="" on purpose (build_image_graph() already treats
+        # "" as "caller explicitly wants no negative prompt", distinct from
+        # None -- see its own docstring). Treating "" as unset here silently
+        # refilled the studio anti-text negative right back in, defeating
+        # that distinction entirely for every model-preset request.
+        if key == "negative_prompt":
+            return key not in out or out[key] is None
+        return out.get(key) in (None, "")
+
+    # "unet_low" (Wan's second, low-noise UNETLoader -- build_wan_i2v_graph())
+    # and "audio_vae" (MiniMax H3's second VAELoader -- build_minimax_h3_graph())
+    # are video-only additions to this same direct-copy loop, for the same
+    # "purely additive" reason as _PRESET_DEFAULT_KEYS above: an image preset
+    # never declares either key.
+    for field in ("unet", "clip", "clip_type", "vae", "unet_low", "audio_vae"):
+        if field in preset and _unset(field):
+            out[field] = preset[field]
+
+    # DEFECT 7: None (absent/never-set) means "the caller didn't specify
+    # loras" and should be filled from the preset; [] is a DELIBERATE "the
+    # user unchecked every LoRA row" and must be left as-is. The old
+    # `not out.get("loras")` check was true for BOTH None and [], so
+    # deselecting every LoRA silently re-added the preset's own.
+    if out.get("loras") is None and preset.get("loras"):
+        out["loras"] = [dict(lora) for lora in preset["loras"] if isinstance(lora, dict)]
+
+    defaults = preset.get("defaults") or {}
+    for field in _PRESET_DEFAULT_KEYS:
+        if field in defaults and _unset(field):
+            out[field] = defaults[field]
+
+    parsed_size = _parse_preset_size(defaults.get("size")) if defaults.get("size") else None
+    if parsed_size:
+        width, height = parsed_size
+        if _unset("width"):
+            out["width"] = width
+        if _unset("height"):
+            out["height"] = height
+
     return out

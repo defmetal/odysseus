@@ -30,6 +30,7 @@ existing ResearchHandler precedent, not something this file tries to solve.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -41,17 +42,21 @@ from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from src.auth_helpers import get_current_user, require_privilege, _auth_disabled
+from src.auth_helpers import require_privilege, require_user
 from src.constants import DATA_DIR, GENERATED_IMAGES_DIR
 from src.comfy_client import ComfyClient, ComfyError, DEFAULT_COMFY_BASE_URL, new_client_id, new_job_id
 from src.comfy_graphs import (
     GraphConversionError,
+    apply_model_preset,
     apply_style_trigger,
     build_image_graph,
+    build_minimax_h3_graph,
     build_wan_i2v_graph,
     filter_safetensors,
     introspect_graph,
+    load_model_registry,
     resolve_lora_entries,
+    resolve_model_entries,
     ui_to_api,
 )
 from src.generated_images import GENERATED_IMAGE_RE, resolve_generated_image_path
@@ -95,7 +100,13 @@ class LoraParam(BaseModel):
 class GenerateParams(BaseModel):
     prompt: str = ""
     negative_prompt: Optional[str] = None
-    loras: List[LoraParam] = []
+    # DEFECT 7: Optional[...] = None (not []) so an ABSENT `loras` field and
+    # a DELIBERATE empty selection (the UI does let a user uncheck every
+    # LoRA row) are distinguishable on the wire -- see apply_model_preset()'s
+    # own docstring (src/comfy_graphs.py) for the None-vs-[] contract this
+    # enables. model_dump()'s "loras" key is therefore None when the
+    # frontend omits it, and [] only when it was sent explicitly.
+    loras: Optional[List[LoraParam]] = None
     width: Optional[int] = None
     height: Optional[int] = None
     batch: Optional[int] = None
@@ -117,6 +128,45 @@ class GenerateParams(BaseModel):
     # "90s anime", ...). When set, the style trigger is applied even with no
     # style LoRA selected. Leave unset for normal behaviour.
     style_hint: Optional[str] = None
+    # data/studio/scripts/models.json preset key ("studio_toei",
+    # "zimage_general", "qwen_image_2512", ...). When set (image kind only),
+    # comfy_generate() resolves it and calls apply_model_preset() to fill any
+    # unet/clip/clip_type/vae/loras/defaults the caller didn't already
+    # override -- "pick a model, type a prompt, hit Generate" (models.json's
+    # own _comment). Its `style_trigger` flag also becomes the AUTHORITY for
+    # whether the studio trigger is applied, superseding the old any-style-
+    # LoRA-selected gate. Unset means "no preset" -- the caller is
+    # responsible for unet/clip/vae/loras itself and the style-trigger gate
+    # falls back to its pre-existing kind-based behaviour, exactly like every
+    # request before this field existed (a direct API caller that never
+    # passes `model` keeps working unchanged).
+    model: Optional[str] = None
+    # CLIPLoader "type" combo ("lumina2" for Z-Image, "qwen_image" for
+    # Qwen-Image, "minimax" for MiniMax H3, ...). Normally filled by a model
+    # preset; settable directly for a caller that supplies unet/clip/vae
+    # itself without a preset key.
+    clip_type: Optional[str] = None
+    # -- MiniMax H3 only (kind == "video", model == "minimax_h3") -- all
+    # Optional/None-default so every OTHER kind/model combination is fully
+    # unaffected by their existence (Pydantic simply never sees them set).
+    # duration, in SECONDS -- converted to build_minimax_h3_graph()'s raw
+    # `length` frame count via src/comfy_graphs.py's _h3_length(). NOT a raw
+    # frame count itself (task: expose duration in seconds to the user).
+    seconds: Optional[float] = None
+    # OPTIONAL end frame -- a SECOND, independent image slot alongside the
+    # existing `input_image` (H3's own start/"first" frame). Resolved through
+    # the EXACT SAME upload/gallery-passthrough bridge as input_image (see
+    # _resolve_input_image() below) -- just a second filename.
+    last_frame: Optional[str] = None
+    # MiniMaxH3SigmaShift's two floats (12.0/3.0 are that node's own
+    # defaults). The node is omitted from the built graph entirely unless a
+    # request differs from them -- see build_minimax_h3_graph().
+    shift_video: Optional[float] = None
+    shift_audio: Optional[float] = None
+    # The SECOND VAELoader (the existing `vae` field is the VIDEO vae for
+    # H3). Both are REQUIRED by build_minimax_h3_graph() -- there is no
+    # "no audio" mode for that graph.
+    audio_vae: Optional[str] = None
 
 
 class GenerateRequest(BaseModel):
@@ -136,12 +186,17 @@ def _client() -> ComfyClient:
 
 
 def _require_user(request: Request) -> str:
-    user = get_current_user(request)
-    if not user:
-        if _auth_disabled():
-            return ""
-        raise HTTPException(401, "Not authenticated")
-    return user
+    # DEFECT 10: delegate to the shared require_user() (src/auth_helpers.py)
+    # instead of re-implementing a narrower subset of its cases. The old body
+    # only handled AUTH_ENABLED=false; require_user() also covers the
+    # unconfigured-first-run + loopback case and LOCALHOST_BYPASS=true +
+    # loopback -- under LOCALHOST_BYPASS, /generate (which already went
+    # through require_privilege -> require_user) used to succeed while every
+    # OTHER route here (/stream, /status, /options, /workflows) 401'd through
+    # this function instead, and this now also rejects an `ody_` bearer token
+    # the same way require_user() does (this file has no scope-aware handling
+    # for one).
+    return require_user(request)
 
 
 def _workflows_dir() -> Path:
@@ -185,16 +240,29 @@ def _classify_workflow(path: Path) -> str:
     return "unknown"
 
 
-def _load_curated_loras() -> list[dict]:
-    """Enabled entries from data/studio/scripts/loras.json (plan §6.3a)."""
+def _read_loras_registry() -> dict:
+    """Raw data/studio/scripts/loras.json "loras" dict (key -> entry),
+    UNFILTERED by "enabled" -- unlike _load_curated_loras() below (which only
+    returns entries meant to populate the default LoRA-picker dropdown), a
+    model preset's own loras[].key (models.json) may reference any
+    registered LoRA regardless of that curation flag, so key resolution
+    (_resolve_preset_lora_keys()) must see the full registry, not the
+    curated subset. Both functions share this one file-read rather than
+    each doing their own (plan/task: "reuse the existing resolution path --
+    don't duplicate it")."""
     path = Path(DATA_DIR) / "studio" / "scripts" / "loras.json"
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
-        logger.warning("comfy_options: could not read loras.json: %s", e)
-        return []
+        logger.warning("comfy: could not read loras.json: %s", e)
+        return {}
+    return raw.get("loras") or {}
+
+
+def _load_curated_loras() -> list[dict]:
+    """Enabled entries from data/studio/scripts/loras.json (plan §6.3a)."""
     out = []
-    for key, entry in (raw.get("loras") or {}).items():
+    for key, entry in _read_loras_registry().items():
         if not isinstance(entry, dict) or not entry.get("enabled", True):
             continue
         out.append({
@@ -207,6 +275,88 @@ def _load_curated_loras() -> list[dict]:
             "note": entry.get("note", ""),
         })
     return out
+
+
+def _resolve_preset_lora_keys(keyed_loras: Optional[list]) -> list[dict]:
+    """Translate a model preset's OWN loras list (models.json's registry
+    form, `[{"key": <loras.json key>, "weight": ...}, ...]` -- see that
+    file's _comment) into the wire shape the rest of this module already
+    understands (`[{"comfy_name": ..., "weight": ..., "kind": ...}, ...]`),
+    by looking each "key" up in loras.json via `_read_loras_registry()`.
+
+    An entry whose key isn't a real (or complete) loras.json entry is
+    dropped -- logged, not raised -- rather than reaching build_image_graph()
+    with an empty comfy_name, which raises ValueError deep inside the graph
+    builder (src/comfy_graphs.py) instead of degrading; a hand-edited
+    models.json typo should not 500 the request.
+
+    This function ONLY does the key -> comfy_name translation. The actual
+    live-availability check (does ComfyUI currently have this file?) is left
+    to happen exactly where it already did for a directly wire-submitted
+    loras list -- comfy_generate()'s existing DEFECT-1 resolve_lora_entries()
+    block below runs on whatever this function returns, so there remains
+    exactly one code path that ever rejects an unavailable LoRA.
+    """
+    registry = _read_loras_registry()
+    out = []
+    for item in keyed_loras or []:
+        if not isinstance(item, dict):
+            continue
+        key = item.get("key")
+        entry = registry.get(key) if key else None
+        if not isinstance(entry, dict) or not entry.get("comfy_name"):
+            logger.warning("comfy: model preset referenced unknown/incomplete loras.json key %r -- dropped", key)
+            continue
+        out.append({
+            "comfy_name": entry["comfy_name"],
+            "weight": item.get("weight", entry.get("default_weight", 1.0)),
+            "kind": entry.get("kind", ""),
+        })
+    return out
+
+
+def _load_model_presets() -> tuple[dict, list[dict]]:
+    """Returns (registry, flattened_list):
+      - registry: the raw load_model_registry() dict (`{"default": ...,
+        "models": {key: {...}, ...}}`) -- used at generate time to look up
+        ONE preset by key, "enabled" or not (see comfy_generate()).
+      - flattened_list: registry["models"] turned into a list of dicts each
+        carrying its own "key", ENABLED entries only -- mirrors how
+        _load_curated_loras() flattens loras.json -- for /api/comfy/options'
+        `models: [...]` response (the dropdown should not offer a disabled
+        preset, same "enabled hides it from the default list without
+        deleting the record" convention loras.json already documents).
+    """
+    registry = _cached_model_registry()  # DEFECT 15
+    out = []
+    for key, entry in (registry.get("models") or {}).items():
+        if not isinstance(entry, dict) or not entry.get("enabled", True):
+            continue
+        out.append({**entry, "key": key})
+    return registry, out
+
+
+def _load_video_model_presets() -> tuple[dict, list[dict]]:
+    """Video counterpart of _load_model_presets() -- same (registry,
+    flattened_list) shape, reading data/studio/scripts/models.json's
+    `video_models`/`default_video_model` keys instead of `models`/`default`
+    (added alongside the existing image section; see that file's own
+    `_comment_video_models` for the schema).
+
+    load_model_registry() already returns the FULL parsed models.json dict
+    (not just the "models" subtree) -- so a valid file's `video_models`/
+    `default_video_model` keys are already present on `registry` with ZERO
+    changes needed to that function. This only does its OWN flattening step
+    (ENABLED entries only, each carrying its own "key"), mirroring
+    _load_model_presets()'s exact contract for the image side.
+    """
+    registry = _cached_model_registry()  # DEFECT 15
+    out = []
+    for key, entry in (registry.get("video_models") or {}).items():
+        if not isinstance(entry, dict) or not entry.get("enabled", True):
+            continue
+        out.append({**entry, "key": key})
+    return registry, out
 
 
 # DEFECT 1 -- a short-lived, in-process cache of ComfyUI's full /object_info
@@ -230,6 +380,26 @@ async def _cached_object_info(*, force: bool = False) -> dict:
     data = await _client().object_info()
     _OBJECT_INFO_CACHE["ts"] = time.time()
     _OBJECT_INFO_CACHE["data"] = data
+    return data
+
+
+# DEFECT 15: same short-lived-cache pattern as _OBJECT_INFO_CACHE above, for
+# data/studio/scripts/models.json. Before this, /api/comfy/options parsed it
+# twice per request (_load_model_presets() + _load_video_model_presets(),
+# called back to back) and comfy_generate() a third time independently --
+# load_model_registry() itself does a synchronous disk read + json.loads
+# with no caching of its own.
+_MODEL_REGISTRY_CACHE: dict = {"ts": 0.0, "data": None}
+_MODEL_REGISTRY_CACHE_TTL_SECONDS = 60.0
+
+
+def _cached_model_registry(*, force: bool = False) -> dict:
+    now = time.time()
+    if not force and _MODEL_REGISTRY_CACHE["data"] is not None and (now - _MODEL_REGISTRY_CACHE["ts"]) < _MODEL_REGISTRY_CACHE_TTL_SECONDS:
+        return _MODEL_REGISTRY_CACHE["data"]
+    data = load_model_registry()
+    _MODEL_REGISTRY_CACHE["ts"] = time.time()
+    _MODEL_REGISTRY_CACHE["data"] = data
     return data
 
 
@@ -345,6 +515,27 @@ def _new_job(owner: str, kind: str, workflow: Optional[str], session_id: Optiona
     }
 
 
+# DEFECT 2: _JOBS is otherwise never evicted -- every /generate call adds an
+# entry and nothing ever removes it, so it grows without bound over the
+# container's uptime. Pruned from _run_job's own `finally` (once per
+# completed job, not on a timer) so growth is bounded by job throughput.
+# _JOB_MAX_AGE_SECONDS mirrors static/js/genParams.js's own
+# INFLIGHT_MAX_AGE_MS (30 min) -- comfortably longer than /stream's SSE loop
+# or a /cancel call needs to still find a just-finished job.
+_JOB_MAX_AGE_SECONDS = 30 * 60
+
+
+def _prune_old_jobs(*, now: Optional[float] = None) -> None:
+    now = now if now is not None else time.time()
+    stale = [
+        jid for jid, j in _JOBS.items()
+        if j.get("status") in ("done", "error", "cancelled")
+        and (now - float(j.get("started_at") or 0)) > _JOB_MAX_AGE_SECONDS
+    ]
+    for jid in stale:
+        _JOBS.pop(jid, None)
+
+
 def _apply_progress_state(job: dict, data: dict) -> None:
     nodes = data.get("nodes") or {}
     if not nodes:
@@ -355,10 +546,20 @@ def _apply_progress_state(job: dict, data: dict) -> None:
     job["max"] = total_max
     if total_max:
         job["percent"] = round(min(100.0, (total_value / total_max) * 100), 1)
-    # Surface whichever node this update is about as the "current" node.
-    last_node_id = next(iter(nodes.keys()), None)
-    if last_node_id is not None:
-        job["node"] = last_node_id
+    # DEFECT 6: `nodes` is keyed by node_id; ComfyUI populates it in
+    # execution order, but the FIRST key is often just the first node
+    # ComfyUI loaded (e.g. UNETLoader), not the one actually running -- so
+    # the label used to stick there for the whole run instead of advancing
+    # to e.g. "KSampler". Prefer whichever node ComfyUI currently reports as
+    # "running"; fall back to the LAST reported node (the most recently
+    # started, per that same execution order) rather than the first, so the
+    # label still advances even on an update shape this doesn't recognize.
+    running_id = next((nid for nid, n in nodes.items() if n.get("state") == "running"), None)
+    if running_id is None:
+        node_ids = list(nodes.keys())
+        running_id = node_ids[-1] if node_ids else None
+    if running_id is not None:
+        job["node"] = running_id
 
 
 # ---------------------------------------------------------------------------
@@ -478,26 +679,32 @@ async def _run_job(job_id: str, graph: dict, client_id: str) -> None:
     # instead (GAP 3 / plan §5 point 6: poll before giving up).
     completed = False
     try:
-        async for event in client.run_and_stream(graph, client_id):
-            mtype = event.get("type")
-            data = event.get("data") or {}
-            if mtype == "queued":
-                job["prompt_id"] = data.get("prompt_id")
-                job["status"] = "running"
-                job["_ready"].set()
-            elif mtype == "progress_state":
-                _apply_progress_state(job, data)
-            elif mtype == "executing":
-                if data.get("node") is not None:
-                    job["node"] = data.get("node")
-                else:
-                    completed = True
-            elif mtype == "executed":
-                pass  # per-node completion; progress_state already drives percent
-            elif mtype in ("execution_error", "execution_interrupted"):
-                job["status"] = "error" if mtype == "execution_error" else "cancelled"
-                job["error"] = _format_error_event(data)
-                return
+        # DEFECT 17: wrap in contextlib.aclosing so an early `return` from
+        # inside the loop (the execution_error/execution_interrupted branch
+        # below) still deterministically closes the underlying async
+        # generator -- and with it, its open websocket -- instead of leaving
+        # both open until the garbage collector eventually finalizes them.
+        async with contextlib.aclosing(client.run_and_stream(graph, client_id)) as stream:
+            async for event in stream:
+                mtype = event.get("type")
+                data = event.get("data") or {}
+                if mtype == "queued":
+                    job["prompt_id"] = data.get("prompt_id")
+                    job["status"] = "running"
+                    job["_ready"].set()
+                elif mtype == "progress_state":
+                    _apply_progress_state(job, data)
+                elif mtype == "executing":
+                    if data.get("node") is not None:
+                        job["node"] = data.get("node")
+                    else:
+                        completed = True
+                elif mtype == "executed":
+                    pass  # per-node completion; progress_state already drives percent
+                elif mtype in ("execution_error", "execution_interrupted"):
+                    job["status"] = "error" if mtype == "execution_error" else "cancelled"
+                    job["error"] = _format_error_event(data)
+                    return
 
         if not completed:
             await _finish_via_poll_or_error(job, job_id, client, None)
@@ -524,6 +731,16 @@ async def _run_job(job_id: str, graph: dict, client_id: str) -> None:
             await _finish_via_poll_or_error(job, job_id, client, e)
     finally:
         job["_ready"].set()
+        # DEFECT 16: plan section 9 risk 1's stated VRAM mitigation ("POST
+        # :8188/free after each Comfy job") was never actually wired up
+        # anywhere -- best-effort, never allowed to mask the job's real
+        # outcome above.
+        try:
+            await client.free()
+        except Exception as e:
+            logger.warning("comfy job %s: POST /free failed (non-fatal): %s", job_id, e)
+        _write_terminal_turn(job)
+        _prune_old_jobs()  # DEFECT 2
 
 
 async def _land_images(job: dict) -> list[dict]:
@@ -607,6 +824,172 @@ async def _land_images(job: dict) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Chat-history persistence -- Image/Video tabs previously wrote a GalleryImage
+# row (above) but NEVER a ChatMessage, so a session used only from these tabs
+# had message_count == 0 forever: SessionManager.load_sessions() only loads
+# sessions with message_count > 0 into RAM at boot (core/session_manager.py),
+# so the session vanished from GET /sessions (the sidebar) after any restart
+# -- exactly the reported bug ("chats that use video or images only don't
+# seem to be saved... they just disappear"). Fixed by writing a real turn
+# through the SAME session_manager.add_message() path Chat/Agent mode use
+# (routes/chat_routes.py), which also handles message_count/last_message_at/
+# updated_at (TimestampMixin's onupdate) for free -- see core/session_manager.
+# py's _persist_message().
+# ---------------------------------------------------------------------------
+
+def _write_user_turn(
+    session_id: Optional[str], kind: str, workflow: Optional[str],
+    prompt: str, model_key: Optional[str],
+) -> None:
+    """Persist the Image/Video-tab request as the USER half of a chat turn.
+
+    Called from POST /generate itself (comfy_generate(), before the
+    background job/render even starts) so the session's message_count goes
+    from 0 to 1 immediately -- "the turn appears immediately, not only after
+    a slow render" (task requirement), and the session survives a restart
+    even if the render is still in flight or later fails/gets cancelled.
+
+    `prompt` is the ORIGINAL, pre-style-trigger text the user typed (the
+    caller passes job["user_prompt"], captured from body.params.prompt before
+    apply_style_trigger() mutates the working `params` dict) -- so the visible
+    user bubble shows their own words, not "toei90s style, smoon, ...".
+
+    Never raises: a chat-history write failure must not break generation.
+    """
+    # DEFECT 5: _valid_session_id() hits the DB -- it must be INSIDE the try
+    # too, or a DB failure here propagates straight out of comfy_generate()
+    # (this runs before the background job task is even created), i.e. a 500
+    # plus an orphaned _JOBS entry, instead of the "never raises" contract
+    # this function documents.
+    try:
+        sid = _valid_session_id(session_id)
+        if not sid:
+            return
+        from core.models import ChatMessage, get_session_manager_instance
+        session_manager = get_session_manager_instance()
+        if session_manager is None:
+            return
+        sess = session_manager.get_session(sid)
+
+        kind_label = "Video" if kind == "video" else "Image"
+        note_bits = [f"{kind_label} tab"]
+        if model_key:
+            note_bits.append(f"model: {model_key}")
+        elif workflow and workflow != "Custom":
+            note_bits.append(f"workflow: {workflow}")
+        note = " · ".join(note_bits)
+        text = (prompt or "").strip()
+        content = f"{text}\n\n_(via {note})_" if text else f"_(via {note})_"
+
+        sess.add_message(ChatMessage("user", content, metadata={"source": "comfy", "kind": kind}))
+    except Exception:
+        logger.exception("comfy: failed to persist user turn for session %s", session_id)
+
+
+def _write_terminal_turn(job: dict) -> None:
+    """Persist a finished/failed/cancelled Comfy job as the ASSISTANT half of
+    the turn _write_user_turn() opened.
+
+    Reuses the EXACT SAME rendering convention Chat mode's agent image-gen
+    tool call already uses (routes/chat_routes.py's do_generate_image()
+    branch + static/js/chatRenderer.js's addMessage()):
+    metadata.tool_events = [{round, tool, command, output, exit_code,
+    image_url, image_id, image_prompt, image_model, image_size}, ...] -- one
+    event per landed image (or one video). image_url doubles as the video URL;
+    the frontend tells them apart by extension (chatRenderer.buildVideoBubble
+    vs buildImageBubble), same as genParams.js's own live-rendering path
+    already does for the transient bubble.
+
+    Called from _run_job()'s `finally` (covers done/error/cancelled-via-WS)
+    AND from POST /cancel (covers a user-initiated cancel, which may resolve
+    before _run_job's WS stream ever sees `execution_interrupted` -- e.g. a
+    still-queued job). Idempotent via job["_chat_written"] so a job reachable
+    from both never double-writes the turn. Never raises.
+    """
+    if job.get("_chat_written"):
+        return
+    job["_chat_written"] = True
+    # DEFECT 5: same fix as _write_user_turn() above -- _valid_session_id()
+    # must be inside the try. This runs from _run_job()'s `finally`, so a DB
+    # failure here previously escaped as an unretrieved exception on the
+    # background task instead of being swallowed per this function's own
+    # "Never raises" contract.
+    try:
+        sid = _valid_session_id(job.get("session_id"))
+        if not sid:
+            return
+        from core.models import ChatMessage, get_session_manager_instance
+        from routes.chat_helpers import needs_auto_name, auto_name_session, _spawn_bg
+        session_manager = get_session_manager_instance()
+        if session_manager is None:
+            return
+        sess = session_manager.get_session(sid)
+
+        kind = job.get("kind") or "image"
+        kind_label = "Video" if kind == "video" else "Image"
+        tool_name = "generate_video" if kind == "video" else "generate_image"
+        params = job.get("params") or {}
+        prompt = (job.get("user_prompt") or params.get("prompt") or "").strip()[:100] or "(no prompt)"
+        model_label = params.get("model") or "ComfyUI"
+        width, height = params.get("width"), params.get("height")
+        size = f"{width}x{height}" if width and height else None
+        images = job.get("images") or []
+        status = job.get("status")
+
+        tool_events: list[dict] = []
+        if status == "done" and images:
+            for img in images:
+                tool_events.append({
+                    "round": 1,
+                    "tool": tool_name,
+                    "command": prompt,
+                    "output": "",
+                    "exit_code": 0,
+                    "image_url": img.get("url"),
+                    "image_id": img.get("gallery_id"),
+                    "image_prompt": prompt,
+                    "image_model": model_label,
+                    "image_size": size,
+                })
+            if kind == "video":
+                content = f"Generated video for: {prompt}"
+            else:
+                n = len(images)
+                content = f"Generated {n} image{'s' if n != 1 else ''} for: {prompt}"
+        elif status == "done":
+            content = f"{kind_label} generation finished with no output."
+            tool_events.append({
+                "round": 1, "tool": tool_name, "command": prompt,
+                "output": "ComfyUI reported success but produced no images.", "exit_code": 1,
+            })
+        elif status == "cancelled":
+            content = f"{kind_label} generation cancelled."
+            tool_events.append({
+                "round": 1, "tool": tool_name, "command": prompt,
+                "output": job.get("error") or "Cancelled by user.", "exit_code": 1,
+            })
+        else:  # "error", or any other status reached defensively
+            content = f"{kind_label} generation failed: {job.get('error') or 'unknown error'}"
+            tool_events.append({
+                "round": 1, "tool": tool_name, "command": prompt,
+                "output": job.get("error") or "", "exit_code": 1,
+            })
+
+        # DEFECT 4: static/js/chatRenderer.js's addMessage() reads
+        # metadata.round_texts (falling back to []) to get the actual text
+        # to render per round -- tool_events alone renders no bubble text at
+        # all on reload (only a collapsed <details> with the reason), per
+        # src/agent_loop.py's own convention of always writing round_texts
+        # alongside tool_events.
+        sess.add_message(ChatMessage("assistant", content, metadata={"tool_events": tool_events, "round_texts": [content], "model": model_label}))
+
+        if needs_auto_name(sess.name):
+            _spawn_bg(auto_name_session(session_manager, sess))
+    except Exception:
+        logger.exception("comfy: failed to persist terminal turn for session %s", job.get("session_id"))
+
+
+# ---------------------------------------------------------------------------
 # Router
 # ---------------------------------------------------------------------------
 
@@ -631,6 +1014,8 @@ def setup_comfy_routes() -> APIRouter:
     @router.get("/api/comfy/options")
     async def comfy_options(request: Request):
         _require_user(request)
+        registry, model_list = _load_model_presets()
+        video_registry, video_model_list = _load_video_model_presets()
         result = {
             "loras": _load_curated_loras(),
             "loras_all": [],
@@ -639,6 +1024,16 @@ def setup_comfy_routes() -> APIRouter:
             "clips": [],
             "samplers": [],
             "schedulers": [],
+            "models": model_list,
+            "default_model": registry.get("default"),
+            # Video counterpart (task item 3) -- data/studio/scripts/
+            # models.json's new `video_models` section, resolved for
+            # availability the SAME way as `models` below (reusing
+            # resolve_model_entries() against the same live unets/clips/vaes
+            # -- H3 uses UNETLoader/CLIPLoader/VAELoader too, just different
+            # filenames/type values, so no separate combo lookup is needed).
+            "video_models": video_model_list,
+            "default_video_model": video_registry.get("default_video_model"),
         }
         try:
             info = await _cached_object_info()
@@ -658,6 +1053,20 @@ def setup_comfy_routes() -> APIRouter:
                 {**entry, "available": True, "resolved_name": entry.get("comfy_name")}
                 for entry in result["loras"]
             ]
+            # Same rationale for model presets -- e.g. the Qwen-Image preset,
+            # whose ~30GB download is in progress per the task this shipped
+            # under, must not be greyed out just because ComfyUI happens to
+            # be unreachable THIS request; that's orthogonal to whether its
+            # files exist. Same for video_models -- the H3 download is its
+            # own multi-file, ~42.5GB in-progress case.
+            result["models"] = [
+                {**entry, "available": True, "missing": []}
+                for entry in result["models"]
+            ]
+            result["video_models"] = [
+                {**entry, "available": True, "missing": []}
+                for entry in result["video_models"]
+            ]
             return result
         # DEFECT 1: resolve each curated entry's comfy_name against ComfyUI's
         # LIVE LoraLoaderModelOnly list (exact -> basename -> unavailable; see
@@ -673,6 +1082,19 @@ def setup_comfy_routes() -> APIRouter:
         result["clips"] = _combo_options(info, "CLIPLoader", "clip_name")
         result["samplers"] = _combo_options(info, "KSampler", "sampler_name")
         result["schedulers"] = _combo_options(info, "KSampler", "scheduler")
+        # Model presets: same exact -> basename -> unavailable resolution as
+        # the LoRA registry, applied to each preset's unet/clip/vae (plan
+        # §14.6 / src/comfy_graphs.py's resolve_model_entries() docstring).
+        # This is what marks the Qwen preset unavailable today (its files
+        # are mid-download -- task constraint) and flips it to available
+        # later with zero code change once they land and ComfyUI restarts.
+        live_for_models = {"unets": result["unets"], "clips": result["clips"], "vaes": result["vaes"]}
+        result["models"] = resolve_model_entries(result["models"], live_for_models)
+        # Same function, same live lists -- resolve_model_entries() also
+        # checks unet_low/audio_vae when a video preset declares them (Wan's
+        # low-noise unet, H3's audio vae). This is what marks the MiniMax H3
+        # preset unavailable while its ~42.5GB download is in progress.
+        result["video_models"] = resolve_model_entries(result["video_models"], live_for_models)
         return result
 
     @router.get("/api/comfy/workflows")
@@ -711,7 +1133,11 @@ def setup_comfy_routes() -> APIRouter:
             except Exception as e:
                 return {"ok": False, "params": {}, "unsupported": [], "error": f"Could not read workflow file: {e}"}
             try:
-                object_info = await _client().object_info()
+                # DEFECT 15: use the shared ~60s cache (mirrors
+                # /api/comfy/options and comfy_generate()'s own use of it)
+                # instead of pulling ComfyUI's ENTIRE node registry over the
+                # network on every single workflow-params request.
+                object_info = await _cached_object_info()
                 api_graph = ui_to_api(ui_graph, object_info)
             except GraphConversionError as e:
                 # Tier 3: the honest escape hatch (plan §4c).
@@ -768,27 +1194,109 @@ def setup_comfy_routes() -> APIRouter:
             raise HTTPException(400, f"Unknown kind: {body.kind!r}")
 
         params = body.params.model_dump()
+        # Which video graph builder to use -- resolved inside the
+        # `elif body.kind == "video"` block below when a `model` key is
+        # given; stays at this default (Wan, the pre-H3 behaviour) otherwise,
+        # which is exactly the "keep the existing Wan behaviour working
+        # unchanged when no model is given" contract the task requires. Never
+        # read at all for kind == "image".
+        video_engine = "wan22_i2v"
 
         if body.kind == "image":
-            # Style trigger is applied ONLY when a style LoRA is actually in
-            # play. The trigger words ("toei90s style, smoon") are the tokens
-            # the style LoRA was trained against -- with no style LoRA loaded
-            # they are not neutral, they are noise: "smoon" means nothing to
-            # base Z-Image and "toei90s style" drags it toward generic retro
-            # anime. Prepending them unconditionally made it impossible to get
-            # a clean general-purpose render out of this tab even with every
-            # LoRA deselected.
+            # Model preset (data/studio/scripts/models.json) resolution --
+            # MUST run before the style-trigger decision below (a resolved
+            # preset's style_trigger becomes the authority) and before
+            # build_image_graph() (apply_model_preset() can fill unet/clip/
+            # clip_type/vae/loras). Image kind only: models.json's `models`
+            # section is scoped to the Image tab -- a video request's `model`
+            # field is resolved against the SEPARATE `video_models` section
+            # in the elif branch below, never this one.
+            preset: Optional[dict] = None
+            model_key = params.get("model")
+            if model_key:
+                model_registry = _cached_model_registry()  # DEFECT 15
+                preset = (model_registry.get("models") or {}).get(model_key)
+                if preset is None:
+                    raise HTTPException(
+                        400,
+                        f"Unknown model {model_key!r}. Known models: "
+                        + ", ".join(sorted((model_registry.get("models") or {}).keys())),
+                    )
+                try:
+                    info = await _cached_object_info()
+                except Exception as e:
+                    # ComfyUI unreachable right now -- cannot verify, so let
+                    # it through unresolved (same graceful-degrade rationale
+                    # as the LoRA availability block below, and
+                    # /api/comfy/options): the actual failure will surface
+                    # naturally when _run_job() tries to queue the prompt.
+                    logger.warning(
+                        "comfy_generate: could not verify model %r availability against live ComfyUI: %s",
+                        model_key, e,
+                    )
+                else:
+                    live_for_model = {
+                        "unets": _combo_options(info, "UNETLoader", "unet_name"),
+                        "clips": _combo_options(info, "CLIPLoader", "clip_name"),
+                        "vaes": _combo_options(info, "VAELoader", "vae_name"),
+                    }
+                    checked = resolve_model_entries([preset], live_for_model)[0]
+                    if not checked["available"]:
+                        raise HTTPException(
+                            400,
+                            f"Model {model_key!r} is not available on the ComfyUI server yet "
+                            f"(missing: {', '.join(checked['missing'])}). Its files may still be "
+                            f"downloading, or ComfyUI may need a restart to see them.",
+                        )
+
+                # A caller-supplied loras list is always respected as-is
+                # (including a deliberate empty one -- see
+                # apply_model_preset()'s docstring for why "absent" and
+                # "deliberately empty" can't be told apart at this layer);
+                # only fill from the preset's OWN loras when none was given.
+                # DEFECT 7: only a truly ABSENT loras field (None) means
+                # "use the preset's own LoRAs" -- an explicit [] is now a
+                # deliberate "the user unchecked every row" (GenerateParams.
+                # loras is Optional[...] = None, so the two are no longer
+                # wire-identical; see that field's own comment).
+                used_preset_loras = bool(params.get("loras") is None and preset.get("loras"))
+                params = apply_model_preset(params, preset)
+                if used_preset_loras:
+                    # The preset's loras are KEYED (models.json's
+                    # {"key": <loras.json key>, "weight": ...} form -- not
+                    # yet a real comfy_name). Translate through loras.json
+                    # BEFORE the existing live-availability block below (which
+                    # only understands the comfy_name wire shape) sees them.
+                    params["loras"] = _resolve_preset_lora_keys(params["loras"])
+
+            # Style trigger. NEW AUTHORITY: when a model preset was resolved
+            # above, ITS style_trigger flag decides -- not which LoRAs
+            # happen to be attached. This is what makes picking e.g.
+            # "Qwen-Image" or "Z-Image (base)" reliably general-mode
+            # (style_trigger: false in models.json) and picking "Studio --
+            # Toei 90s" reliably triggered (true), regardless of what ends
+            # up in params["loras"]. The trigger words ("toei90s style,
+            # smoon") are the tokens the style LoRA was trained against --
+            # with no style LoRA loaded they are not neutral, they are
+            # noise: "smoon" means nothing to base Z-Image and "toei90s
+            # style" drags it toward generic retro anime.
             #
-            # So: zero style LoRAs == "general mode", the ComfyUI-side
-            # equivalent of the :8100 server's Z-Image-General variant.
-            # An explicit style_hint still forces the trigger on, and
-            # apply_style_trigger() stays idempotent, so a saved workflow's
-            # hand-typed trigger is never doubled up (plan §7).
-            _style_loras = [
-                l for l in (params.get("loras") or [])
-                if (l.get("kind") or "").lower() == "style"
-            ]
-            if _style_loras or params.get("style_hint"):
+            # A direct API caller that never sends `model` (predating this
+            # feature, or any script that only knows the old contract) falls
+            # back to the ORIGINAL any-style-LoRA-selected gate, unchanged --
+            # so it keeps working exactly as before. An explicit style_hint
+            # still forces the trigger on either way, and apply_style_trigger()
+            # stays idempotent, so a saved workflow's hand-typed trigger is
+            # never doubled up (plan §7).
+            if preset is not None:
+                trigger_on = bool(preset.get("style_trigger")) or bool(params.get("style_hint"))
+            else:
+                _style_loras = [
+                    l for l in (params.get("loras") or [])
+                    if (l.get("kind") or "").lower() == "style"
+                ]
+                trigger_on = bool(_style_loras) or bool(params.get("style_hint"))
+            if trigger_on:
                 params["prompt"] = apply_style_trigger(
                     params.get("prompt") or "", params.get("style_hint")
                 )
@@ -833,10 +1341,66 @@ def setup_comfy_routes() -> APIRouter:
                 # unresolved; the actual failure will surface naturally when
                 # _run_job() tries to queue the prompt (same graceful-degrade
                 # rationale as /api/comfy/options above).
-        # else: kind == "video" -- deliberately NOT triggered. Wan has no
-        # knowledge of the studio style/character LoRAs (plan §3b /
-        # build_wan_i2v_graph()'s docstring); prepending the trigger would
-        # just add tokens Wan's own text encoder has no use for.
+
+        elif body.kind == "video":
+            # Video model preset (data/studio/scripts/models.json's
+            # `video_models` section) -- same "pick a model, the recipe
+            # follows" idea as the image block above, but deliberately
+            # simpler: NO style trigger (Wan and H3 both have no knowledge of
+            # the studio style/character LoRAs -- build_wan_i2v_graph()'s /
+            # build_minimax_h3_graph()'s own docstrings) and no loras.json
+            # key translation (Wan's LoRA FILENAMES are fixed constants; H3
+            # has no LoRA slot at all). "Keep the existing Wan behaviour
+            # working unchanged when no model is given" (task) -- an absent
+            # `model` key skips this ENTIRE block, exactly like every request
+            # before this feature existed (video_engine stays at its
+            # "wan22_i2v" default set above, and build_wan_i2v_graph() sees
+            # the SAME params dict it always has).
+            video_model_key = params.get("model")
+            if video_model_key:
+                video_registry = _cached_model_registry()  # DEFECT 15
+                video_preset = (video_registry.get("video_models") or {}).get(video_model_key)
+                if video_preset is None:
+                    raise HTTPException(
+                        400,
+                        f"Unknown video model {video_model_key!r}. Known video models: "
+                        + ", ".join(sorted((video_registry.get("video_models") or {}).keys())),
+                    )
+                try:
+                    info = await _cached_object_info()
+                except Exception as e:
+                    # Same graceful-degrade rationale as the image block
+                    # above -- ComfyUI unreachable right now, cannot verify,
+                    # so let it through unresolved.
+                    logger.warning(
+                        "comfy_generate: could not verify video model %r availability against live ComfyUI: %s",
+                        video_model_key, e,
+                    )
+                else:
+                    live_for_video_model = {
+                        "unets": _combo_options(info, "UNETLoader", "unet_name"),
+                        "clips": _combo_options(info, "CLIPLoader", "clip_name"),
+                        "vaes": _combo_options(info, "VAELoader", "vae_name"),
+                    }
+                    checked = resolve_model_entries([video_preset], live_for_video_model)[0]
+                    if not checked["available"]:
+                        raise HTTPException(
+                            400,
+                            f"Video model {video_model_key!r} is not available on the ComfyUI server yet "
+                            f"(missing: {', '.join(checked['missing'])}). Its files may still be "
+                            f"downloading, or ComfyUI may need a restart to see them.",
+                        )
+                params = apply_model_preset(params, video_preset)
+                # AUTHORITATIVE dispatch key for which builder to call below
+                # -- NOT the model key itself (a registry key could in
+                # principle be renamed without this file changing), and NOT
+                # "arch" the way image presets use it (image's arch drives
+                # DEFAULTS ONLY, one builder serves both -- but Wan and H3
+                # are genuinely different graphs; see models.json's own
+                # `_comment_video_models`). Falls back to the Wan default if
+                # a hand-edited preset omits "engine" -- the lighter-weight,
+                # no-huge-download path, same bias as _FALLBACK_MODEL_REGISTRY.
+                video_engine = str(video_preset.get("engine") or "wan22_i2v")
 
         if params.get("input_image"):
             # GAP 1 -- gallery passthrough: an Odysseus gallery filename (or
@@ -851,7 +1415,23 @@ def setup_comfy_routes() -> APIRouter:
             params["input_image_subfolder"] = subfolder
             params["input_image_type"] = ftype
 
-        builder = build_image_graph if body.kind == "image" else build_wan_i2v_graph
+        if params.get("last_frame"):
+            # MiniMax H3's OPTIONAL end frame -- a second, independent
+            # filename resolved through the EXACT SAME upload/gallery-
+            # passthrough bridge as input_image above (task step 11: "reuse
+            # them; do not duplicate"). _resolve_input_image() doesn't care
+            # about the semantic role of the filename it's given.
+            name, subfolder, ftype = await _resolve_input_image(params["last_frame"])
+            params["last_frame"] = name
+            params["last_frame_subfolder"] = subfolder
+            params["last_frame_type"] = ftype
+
+        if body.kind == "image":
+            builder = build_image_graph
+        elif video_engine == "minimax_h3":
+            builder = build_minimax_h3_graph
+        else:
+            builder = build_wan_i2v_graph
         try:
             graph = builder(params)
         except Exception as e:
@@ -873,14 +1453,41 @@ def setup_comfy_routes() -> APIRouter:
         # UI "re-roll with one value changed" action) must NOT re-roll a
         # fresh random seed.
         resolved_params["randomize_seed"] = False
+        # Persist which model preset (if any) made this render, alongside
+        # the resolved seed, so a gallery item's gen_params records "which
+        # model" the same way it already records the seed that produced it.
+        # params["model"] still holds the ORIGINAL requested key regardless
+        # of whether a preset was applied above -- apply_model_preset()
+        # never touches that key itself, only unet/clip/clip_type/vae/loras/
+        # defaults.
+        resolved_params["model"] = params.get("model")
 
         session_id = body.session_id
         job_id = new_job_id()
         client_id = new_client_id()
         job = _new_job(user, body.kind, body.workflow, session_id, resolved_params, graph)
+        # Original, pre-style-trigger prompt text -- what the user actually
+        # typed -- kept separately from resolved_params["prompt"] (which may
+        # have "toei90s style, smoon" prepended by apply_style_trigger()
+        # above) so the chat-history turn shows their own words, not the
+        # internal trigger tokens. See _write_user_turn()/_write_terminal_turn().
+        job["user_prompt"] = (body.params.prompt or "").strip()
         _JOBS[job_id] = job
 
-        asyncio.create_task(_run_job(job_id, graph, client_id))
+        # Write the USER half of the chat turn now, before the (possibly
+        # slow) render -- see _write_user_turn()'s docstring.
+        _write_user_turn(session_id, body.kind, body.workflow, job["user_prompt"], resolved_params.get("model"))
+
+        # DEFECT 3: asyncio only holds a WEAK reference to a task created via
+        # a bare create_task() call -- nothing else here was keeping this one
+        # alive, so the GC was free to collect it mid-run. _spawn_bg()
+        # (routes/chat_helpers.py) holds a strong ref until the task
+        # finishes (the same helper _write_terminal_turn() above already
+        # uses for auto-naming); stashing the handle on the job record also
+        # means it's available for real cancellation later, not just GC
+        # safety.
+        from routes.chat_helpers import _spawn_bg
+        job["_task"] = _spawn_bg(_run_job(job_id, graph, client_id))
 
         try:
             await asyncio.wait_for(job["_ready"].wait(), timeout=20)
@@ -951,9 +1558,16 @@ def setup_comfy_routes() -> APIRouter:
             await _client().cancel(job.get("prompt_id"))
         except Exception as e:
             logger.warning("comfy cancel: request failed for job %s: %s", job_id, e)
-        if job.get("status") not in ("done", "error"):
+        # DEFECT 14: "landing" (images are being fetched/written -- the
+        # render itself already finished successfully server-side) and
+        # "cancelled" (idempotency -- a second /cancel call, or a race with
+        # _run_job already having set it) must not be clobbered back to
+        # "cancelled"; only a still-queued/running job is actually
+        # cancellable here.
+        if job.get("status") not in ("done", "error", "landing", "cancelled"):
             job["status"] = "cancelled"
             job["error"] = job.get("error") or "Cancelled by user"
+            _write_terminal_turn(job)
         return {"ok": True}
 
     return router

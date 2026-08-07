@@ -15,15 +15,21 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from src.comfy_graphs import (  # noqa: E402
+    DEFAULT_NEGATIVE_PROMPT,
     GraphConversionError,
+    apply_model_preset,
     apply_style_trigger,
     build_image_graph,
+    build_minimax_h3_graph,
     build_wan_i2v_graph,
     comfy_image_ref,
     filter_safetensors,
     introspect_graph,
+    load_model_registry,
     resolve_lora_entries,
+    resolve_model_entries,
     ui_to_api,
+    _h3_length,
     _wan_step_split,
 )
 
@@ -745,6 +751,36 @@ def test_ui_to_api_raises_on_widget_count_mismatch():
         raise AssertionError("expected GraphConversionError for a widgets_values/required-input mismatch")
 
 
+def test_ui_to_api_ignores_unconnected_optional_non_widget_input():
+    # DEFECT 12 repro: an OPTIONAL IMAGE/CONDITIONING/CLIP_VISION_OUTPUT-typed
+    # input with no widget representation and no link (e.g. WanImageToVideo's
+    # clip_vision_output, left disconnected -- the normal case) must NOT be
+    # treated as a positional widgets_values slot. ComfyUI's own frontend
+    # never writes a widgets_values entry for a disconnected non-widget
+    # input, so the old code -- which counted it as a "widget" simply because
+    # it wasn't link-satisfied -- ran out of real values and raised
+    # GraphConversionError on an otherwise completely normal export.
+    object_info = _stub_object_info("FakeWanNode", {"width": ("INT", {}), "height": ("INT", {})})
+    object_info["FakeWanNode"]["input"]["optional"] = {
+        "clip_vision_output": ("CLIP_VISION_OUTPUT", {}),
+        "start_image": ("IMAGE", {}),
+    }
+    ui_graph = {
+        "links": [],
+        "nodes": [
+            {
+                "id": 1, "type": "FakeWanNode", "inputs": [],
+                # Only 2 real widget values -- matches a real ComfyUI export,
+                # which never writes a widgets_values entry for a
+                # disconnected optional non-widget input.
+                "widgets_values": [832, 480],
+            },
+        ],
+    }
+    api_graph = ui_to_api(ui_graph, object_info)
+    assert api_graph["1"]["inputs"] == {"width": 832, "height": 480}
+
+
 # ---------------------------------------------------------------------------
 # apply_style_trigger
 # ---------------------------------------------------------------------------
@@ -913,8 +949,885 @@ def test_resolve_lora_entries_non_dict_entry_is_unavailable_not_a_crash():
 
 
 # ---------------------------------------------------------------------------
+# clip_type: parameterized (no longer hardcoded DEFAULT_CLIP_TYPE) + round-
+# trips through introspect_graph -- the "single choice backed by a preset
+# registry" task's critical bit ("lumina2" vs "qwen_image" is the difference
+# between a correct render and silent garbage).
+# ---------------------------------------------------------------------------
+
+def test_clip_type_defaults_to_lumina2_when_absent():
+    graph = build_image_graph({"prompt": "x"})
+    clip_node = next(n for n in graph.values() if n["class_type"] == "CLIPLoader")
+    assert clip_node["inputs"]["type"] == "lumina2"
+
+
+def test_clip_type_flows_into_cliploader_node_when_given():
+    graph = build_image_graph({"prompt": "x", "clip_type": "qwen_image"})
+    clip_node = next(n for n in graph.values() if n["class_type"] == "CLIPLoader")
+    assert clip_node["inputs"]["type"] == "qwen_image"
+
+
+def test_clip_type_round_trips_through_introspect_graph():
+    graph = build_image_graph({"prompt": "x", "clip_type": "qwen_image"})
+    out = introspect_graph(graph)["params"]
+    assert out["clip_type"] == "qwen_image"
+
+
+def test_clip_type_round_trip_default_is_lumina2():
+    graph = build_image_graph({"prompt": "x"})
+    out = introspect_graph(graph)["params"]
+    assert out["clip_type"] == "lumina2"
+
+
+# ---------------------------------------------------------------------------
+# apply_model_preset: fills unset fields only, caller values always win,
+# never mutates its inputs
+# ---------------------------------------------------------------------------
+
+def test_apply_model_preset_fills_unset_fields_from_preset():
+    preset = {
+        "unet": "z_image_bf16.safetensors", "clip": "qwen_3_4b.safetensors",
+        "clip_type": "lumina2", "vae": "ae.safetensors",
+        "loras": [{"key": "toei90s_v4_1", "weight": 1.0}],
+        "defaults": {
+            "steps": 30, "cfg": 4.5, "sampler": "res_multistep", "scheduler": "simple",
+            "shift": 3, "size": "1216x672", "negative_prompt": "text, letters",
+        },
+    }
+    out = apply_model_preset({"prompt": "a hero"}, preset)
+    assert out["unet"] == "z_image_bf16.safetensors"
+    assert out["clip"] == "qwen_3_4b.safetensors"
+    assert out["clip_type"] == "lumina2"
+    assert out["vae"] == "ae.safetensors"
+    assert out["loras"] == [{"key": "toei90s_v4_1", "weight": 1.0}]
+    assert out["steps"] == 30
+    assert out["cfg"] == 4.5
+    assert out["sampler"] == "res_multistep"
+    assert out["scheduler"] == "simple"
+    assert out["shift"] == 3
+    assert out["negative_prompt"] == "text, letters"
+    assert out["width"] == 1216
+    assert out["height"] == 672
+    assert out["prompt"] == "a hero"  # untouched, non-preset key preserved
+
+
+def test_apply_model_preset_caller_values_always_win():
+    preset = {
+        "unet": "preset_unet.safetensors", "clip_type": "qwen_image",
+        "loras": [{"key": "toei90s_v4_1", "weight": 1.0}],
+        "defaults": {"steps": 20, "cfg": 4.0, "size": "1024x1024"},
+    }
+    params = {
+        "prompt": "x", "unet": "my_own_unet.safetensors", "steps": 55, "width": 500,
+        "loras": [{"comfy_name": "already_chosen.safetensors", "weight": 0.5}],
+    }
+    out = apply_model_preset(params, preset)
+    assert out["unet"] == "my_own_unet.safetensors"   # caller wins over preset
+    assert out["steps"] == 55                          # caller wins over preset
+    assert out["width"] == 500                         # caller wins over preset
+    assert out["height"] == 1024                       # caller unset -> preset fills
+    assert out["cfg"] == 4.0                            # caller unset -> preset fills
+    assert out["clip_type"] == "qwen_image"             # caller unset -> preset fills
+    # A caller-supplied (non-empty) loras list must NOT be replaced by the preset's.
+    assert out["loras"] == [{"comfy_name": "already_chosen.safetensors", "weight": 0.5}]
+
+
+def test_apply_model_preset_fills_loras_when_caller_omits_them():
+    # DEFECT 7: GenerateParams.loras is now Optional[List[LoraParam]] = None
+    # at the Pydantic layer (routes/comfy_routes.py), so "the caller didn't
+    # specify loras" arrives here as None -- either the key is absent
+    # entirely, or explicitly None -- not []. See apply_model_preset()'s own
+    # docstring for why None and [] must now be told apart (the UI does let
+    # the user deliberately uncheck every LoRA row).
+    preset = {"loras": [{"key": "toei90s_v4_1", "weight": 1.0}]}
+    out = apply_model_preset({"prompt": "x"}, preset)  # loras key absent entirely
+    assert out["loras"] == [{"key": "toei90s_v4_1", "weight": 1.0}]
+    out2 = apply_model_preset({"prompt": "x", "loras": None}, preset)
+    assert out2["loras"] == [{"key": "toei90s_v4_1", "weight": 1.0}]
+
+
+def test_apply_model_preset_does_not_fill_loras_when_caller_deliberately_sent_empty():
+    # DEFECT 7 repro: an explicit [] means the user unchecked every LoRA row
+    # on purpose -- must NOT be silently refilled with the preset's own
+    # bundled LoRAs (that was the bug: [] used to be indistinguishable from
+    # "absent" before GenerateParams.loras became Optional[...] = None).
+    preset = {"loras": [{"key": "toei90s_v4_1", "weight": 1.0}]}
+    out = apply_model_preset({"prompt": "x", "loras": []}, preset)
+    assert out["loras"] == []
+
+
+def test_apply_model_preset_malformed_size_is_ignored():
+    preset = {"defaults": {"size": "not-a-size"}}
+    out = apply_model_preset({"prompt": "x"}, preset)
+    assert "width" not in out
+    assert "height" not in out
+
+
+def test_apply_model_preset_does_not_mutate_input():
+    preset = {
+        "unet": "preset_unet.safetensors",
+        "loras": [{"key": "a", "weight": 1.0}],
+        "defaults": {"steps": 20, "size": "1024x1024"},
+    }
+    params = {"prompt": "x"}
+    params_snapshot = json.loads(json.dumps(params))
+    preset_snapshot = json.loads(json.dumps(preset))
+    out = apply_model_preset(params, preset)
+    assert params == params_snapshot
+    assert preset == preset_snapshot
+    assert out is not params
+    assert out["loras"] is not preset["loras"]  # fresh list, not a shared reference
+
+
+def test_apply_model_preset_none_preset_returns_copy_of_params():
+    params = {"prompt": "x", "steps": 10}
+    out = apply_model_preset(params, None)
+    assert out == params
+    assert out is not params
+
+
+def test_apply_model_preset_none_params_and_preset_returns_empty_dict():
+    assert apply_model_preset(None, None) == {}
+
+
+# ---------------------------------------------------------------------------
+# DEFECT 1: empty negative_prompt must survive apply_model_preset(), not just
+# build_image_graph() in isolation -- the false-confidence gap the review
+# called out (tests/test_comfy_graphs.py's pre-existing
+# test_negative_prompt_empty_string_is_honoured_not_replaced only ever called
+# build_image_graph() directly, never through the preset layer).
+# ---------------------------------------------------------------------------
+
+def test_apply_model_preset_empty_negative_prompt_not_refilled():
+    # Direct repro of the reviewer's proof: apply_model_preset({"negative_
+    # prompt": ""}, studio_toei-shaped preset)["negative_prompt"] must stay
+    # "", not get refilled with the preset's own anti-text default.
+    preset = {"defaults": {"negative_prompt": "text, letters, lettering, logo, watermark, signature"}}
+    out = apply_model_preset({"prompt": "x", "negative_prompt": ""}, preset)
+    assert out["negative_prompt"] == ""
+
+
+def test_preset_to_builder_empty_negative_prompt_survives_into_graph():
+    # The real, end-to-end path the frontend actually takes (routes/
+    # comfy_routes.py's comfy_generate(): apply_model_preset() then
+    # build_image_graph()) -- not build_image_graph() in isolation.
+    preset = {"defaults": {"negative_prompt": "text, letters, lettering, logo, watermark, signature"}}
+    params = apply_model_preset({"prompt": "a hero", "negative_prompt": "", "loras": []}, preset)
+    graph = build_image_graph(params)
+    negs = [n["inputs"]["text"] for n in graph.values() if n.get("class_type") == "CLIPTextEncode"]
+    assert "" in negs, negs
+    assert DEFAULT_NEGATIVE_PROMPT not in negs, negs
+
+
+# ---------------------------------------------------------------------------
+# resolve_model_entries: model availability -- exact / basename / missing
+# ---------------------------------------------------------------------------
+
+def test_resolve_model_entries_all_present_is_available():
+    entries = [{"key": "studio_toei", "unet": "z_image_bf16.safetensors",
+                "clip": "qwen_3_4b.safetensors", "vae": "ae.safetensors"}]
+    live = {"unets": ["z_image_bf16.safetensors"], "clips": ["qwen_3_4b.safetensors"], "vaes": ["ae.safetensors"]}
+    out = resolve_model_entries(entries, live)
+    assert out[0]["available"] is True
+    assert out[0]["missing"] == []
+    assert out[0]["key"] == "studio_toei"  # other keys preserved verbatim
+
+
+def test_resolve_model_entries_basename_fallback_resolves():
+    # Same DEFECT-1-style trap as LoRAs: a nested-path preset field resolving
+    # against a live server that only reports the bare filename.
+    entries = [{"key": "studio_toei", "unet": "nested/z_image_bf16.safetensors",
+                "clip": "qwen_3_4b.safetensors", "vae": "ae.safetensors"}]
+    live = {"unets": ["z_image_bf16.safetensors"], "clips": ["qwen_3_4b.safetensors"], "vaes": ["ae.safetensors"]}
+    out = resolve_model_entries(entries, live)
+    assert out[0]["available"] is True
+    assert out[0]["missing"] == []
+
+
+def test_resolve_model_entries_reports_all_missing_files():
+    # Mirrors the task's own constraint: the Qwen download is in progress,
+    # so today its files are absent from every live combo list.
+    entries = [{"key": "qwen_image_2512", "unet": "qwen_image_2512_fp8_e4m3fn.safetensors",
+                "clip": "qwen_2.5_vl_7b_fp8_scaled.safetensors", "vae": "qwen_image_vae.safetensors"}]
+    live = {"unets": ["z_image_bf16.safetensors"], "clips": ["qwen_3_4b.safetensors"], "vaes": ["ae.safetensors"]}
+    out = resolve_model_entries(entries, live)
+    assert out[0]["available"] is False
+    assert set(out[0]["missing"]) == {"unet", "clip", "vae"}
+
+
+def test_resolve_model_entries_reports_partial_missing():
+    entries = [{"key": "x", "unet": "present.safetensors", "clip": "missing_clip.safetensors", "vae": "present_vae.safetensors"}]
+    live = {"unets": ["present.safetensors"], "clips": [], "vaes": ["present_vae.safetensors"]}
+    out = resolve_model_entries(entries, live)
+    assert out[0]["available"] is False
+    assert out[0]["missing"] == ["clip"]
+
+
+def test_resolve_model_entries_blank_field_is_not_missing():
+    entries = [{"key": "studio_toei", "unet": "u.safetensors", "clip": "", "vae": ""}]
+    out = resolve_model_entries(entries, {"unets": ["u.safetensors"]})
+    assert out[0]["available"] is True  # nothing declared for clip/vae -- nothing to check
+    assert out[0]["missing"] == []
+
+
+def test_resolve_model_entries_no_live_data_marks_declared_files_missing():
+    entries = [{"key": "x", "unet": "u.safetensors"}]
+    out = resolve_model_entries(entries, None)
+    assert out[0]["available"] is False
+    assert out[0]["missing"] == ["unet"]
+
+
+def test_resolve_model_entries_empty_inputs():
+    assert resolve_model_entries([], {"unets": ["a.safetensors"]}) == []
+    assert resolve_model_entries(None, None) == []
+
+
+# ---------------------------------------------------------------------------
+# load_model_registry: degrade-not-raise + the real repo registry
+# ---------------------------------------------------------------------------
+
+def test_load_model_registry_missing_file_falls_back_instead_of_raising():
+    reg = load_model_registry("/nonexistent/path/models.json")
+    assert isinstance(reg.get("models"), dict) and reg["models"]
+    assert reg["default"] in reg["models"]
+
+
+def test_load_model_registry_malformed_file_falls_back(tmp_path=None):
+    fd, path = tempfile.mkstemp(suffix=".json")
+    with open(fd, "w", encoding="utf-8") as f:
+        f.write("{not valid json")
+    reg = load_model_registry(path)
+    assert isinstance(reg.get("models"), dict) and reg["models"]
+
+
+def test_load_model_registry_against_real_repo_registry():
+    real_path = _REPO_ROOT / "data" / "studio" / "scripts" / "models.json"
+    if not real_path.is_file():
+        raise Skip("data/studio/scripts/models.json not present (gitignored; expected on a fresh clone)")
+    reg = load_model_registry(str(real_path))
+    assert "studio_toei" in reg["models"]
+    assert "qwen_image_2512" in reg["models"]
+    assert reg["default"] == "studio_toei"
+
+
+# ---------------------------------------------------------------------------
+# Qwen preset end-to-end: apply_model_preset() + build_image_graph() produces
+# type: "qwen_image", shift 3.1, euler/simple -- proving the "topologically
+# identical graph, arch drives defaults only" premise the task's plan
+# section is built on, not just that the two functions work in isolation.
+# ---------------------------------------------------------------------------
+
+def test_qwen_preset_end_to_end_graph_shape():
+    # Mirrors data/studio/scripts/models.json's "qwen_image_2512" entry.
+    preset = {
+        "arch": "qwen_image",
+        "unet": "qwen_image_2512_fp8_e4m3fn.safetensors",
+        "clip": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+        "clip_type": "qwen_image",
+        "vae": "qwen_image_vae.safetensors",
+        "loras": [],
+        "style_trigger": False,
+        "defaults": {
+            "steps": 20, "cfg": 4.0, "sampler": "euler", "scheduler": "simple",
+            "shift": 3.1, "size": "1328x1328", "negative_prompt": "",
+        },
+    }
+    params = apply_model_preset({"prompt": "a red panda reading a book"}, preset)
+    graph = build_image_graph(params)
+
+    clip_node = next(n for n in graph.values() if n["class_type"] == "CLIPLoader")
+    assert clip_node["inputs"]["type"] == "qwen_image"
+    assert clip_node["inputs"]["clip_name"] == "qwen_2.5_vl_7b_fp8_scaled.safetensors"
+
+    unet_node = next(n for n in graph.values() if n["class_type"] == "UNETLoader")
+    assert unet_node["inputs"]["unet_name"] == "qwen_image_2512_fp8_e4m3fn.safetensors"
+
+    vae_node = next(n for n in graph.values() if n["class_type"] == "VAELoader")
+    assert vae_node["inputs"]["vae_name"] == "qwen_image_vae.safetensors"
+
+    sampling_node = next(n for n in graph.values() if n["class_type"] == "ModelSamplingAuraFlow")
+    assert sampling_node["inputs"]["shift"] == 3.1
+
+    ksampler = next(n for n in graph.values() if n["class_type"] == "KSampler")
+    assert ksampler["inputs"]["sampler_name"] == "euler"
+    assert ksampler["inputs"]["scheduler"] == "simple"
+    assert ksampler["inputs"]["steps"] == 20
+    assert ksampler["inputs"]["cfg"] == 4.0
+
+    latent = next(n for n in graph.values() if n["class_type"] == "EmptySD3LatentImage")
+    assert latent["inputs"]["width"] == 1328
+    assert latent["inputs"]["height"] == 1328
+
+    assert "LoraLoaderModelOnly" not in _class_types(graph)  # no loras for this preset
+
+    # Round-trips too.
+    out = introspect_graph(graph)["params"]
+    assert out["clip_type"] == "qwen_image"
+    assert out["shift"] == 3.1
+
+
+def test_qwen_preset_against_real_repo_registry():
+    real_path = _REPO_ROOT / "data" / "studio" / "scripts" / "models.json"
+    if not real_path.is_file():
+        raise Skip("data/studio/scripts/models.json not present (gitignored; expected on a fresh clone)")
+    registry = load_model_registry(str(real_path))
+    preset = registry["models"]["qwen_image_2512"]
+    params = apply_model_preset({"prompt": "x"}, preset)
+    graph = build_image_graph(params)
+    clip_node = next(n for n in graph.values() if n["class_type"] == "CLIPLoader")
+    assert clip_node["inputs"]["type"] == "qwen_image"
+    sampling_node = next(n for n in graph.values() if n["class_type"] == "ModelSamplingAuraFlow")
+    assert sampling_node["inputs"]["shift"] == 3.1
+    ksampler = next(n for n in graph.values() if n["class_type"] == "KSampler")
+    assert ksampler["inputs"]["sampler_name"] == "euler"
+    assert ksampler["inputs"]["scheduler"] == "simple"
+
+
+# ---------------------------------------------------------------------------
 # Bare-python3 runner (no pytest required) -- also pytest-discoverable above.
 # ---------------------------------------------------------------------------
+
+def test_negative_prompt_none_falls_back_to_studio_default():
+    """None == caller said nothing -> studio anti-text negative."""
+    g = build_image_graph({"prompt": "x", "loras": []})
+    negs = [n["inputs"]["text"] for n in g.values()
+            if n.get("class_type") == "CLIPTextEncode"]
+    assert DEFAULT_NEGATIVE_PROMPT in negs, negs
+
+
+def test_negative_prompt_empty_string_is_honoured_not_replaced():
+    """'' == caller explicitly wants NO negative prompt, and must NOT be
+    silently replaced by the studio anti-text default. Collapsing the two
+    forced 'text, letters, lettering, ...' onto every render including the
+    general-purpose models.json presets that set negative_prompt to '' --
+    actively harmful for Qwen-Image, whose headline strength is rendering
+    readable text."""
+    g = build_image_graph({"prompt": "x", "loras": [], "negative_prompt": ""})
+    negs = [n["inputs"]["text"] for n in g.values()
+            if n.get("class_type") == "CLIPTextEncode"]
+    assert "" in negs, negs
+    assert DEFAULT_NEGATIVE_PROMPT not in negs, negs
+
+
+def test_negative_prompt_explicit_value_passes_through():
+    g = build_image_graph({"prompt": "x", "loras": [], "negative_prompt": "blurry, jpeg artifacts"})
+    negs = [n["inputs"]["text"] for n in g.values()
+            if n.get("class_type") == "CLIPTextEncode"]
+    assert "blurry, jpeg artifacts" in negs, negs
+
+
+# ---------------------------------------------------------------------------
+# _h3_length: the mod-17 duration(seconds) -> length(frames) helper
+# ---------------------------------------------------------------------------
+
+def test_h3_length_helper_several_values():
+    assert _h3_length(2) == 56   # the authoritative template's own worked example
+    assert _h3_length(0) == 5
+    assert _h3_length(1) == 39
+    assert _h3_length(3) == 73
+    assert _h3_length(4) == 107
+    assert _h3_length(5) == 124  # matches EmptyMiniMaxH3LatentAV's own node default (length=124)
+    assert _h3_length(10) == 243
+
+
+def test_h3_length_always_satisfies_mod17_constraint():
+    # A property of the formula itself for ANY non-negative L, not something
+    # that depends on round()'s tie-breaking rule -- checked broadly rather
+    # than just at the handful of hand-verified values above.
+    for seconds in (0, 0.5, 1, 1.5, 2, 2.5, 3, 4, 5, 6, 7, 8, 9, 10, 12, 20):
+        length = _h3_length(seconds)
+        assert length % 17 == 5, f"seconds={seconds} -> length={length}"
+        assert length >= 5
+
+
+# ---------------------------------------------------------------------------
+# build_minimax_h3_graph: node-set shape, no CLIPTextEncode / no negative-cfg
+# ---------------------------------------------------------------------------
+
+def test_h3_graph_full_node_set():
+    graph = build_minimax_h3_graph({"prompt": "x", "input_image": "start.png"})
+    types = _class_types(graph)
+    for expected in ("UNETLoader", "CLIPLoader", "VAELoader", "LoadImage",
+                      "MiniMaxH3ImageToVideo", "BasicGuider", "RandomNoise",
+                      "KSamplerSelect", "BasicScheduler", "SamplerCustomAdvanced",
+                      "VAEDecode", "VAEDecodeAudio", "CreateVideo", "SaveVideo"):
+        assert expected in types, f"missing {expected} in H3 graph: {types}"
+    assert types.count("UNETLoader") == 1, "H3 has ONE unet (unlike Wan's two)"
+    assert types.count("VAELoader") == 2, "video + audio"
+    assert types.count("VAEDecode") == 1
+    assert types.count("VAEDecodeAudio") == 1
+
+
+def test_h3_graph_has_no_cliptextencode():
+    # The prompt goes straight into MiniMaxH3ImageToVideo as a STRING --
+    # there is no CLIPTextEncode anywhere in this graph, unlike every other
+    # builder in this module.
+    graph = build_minimax_h3_graph({"prompt": "a robot dances in the rain"})
+    assert "CLIPTextEncode" not in _class_types(graph)
+    h3 = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ImageToVideo")
+    assert h3["inputs"]["prompt"] == "a robot dances in the rain"
+
+
+def test_h3_graph_no_negative_or_cfg_anywhere():
+    # H3 structurally has neither -- BasicGuider is unguided/CFG-free. A
+    # caller supplying negative_prompt/cfg must be silently ignored, not
+    # error, and must never leak into the built graph under ANY input name.
+    graph = build_minimax_h3_graph({"prompt": "x", "negative_prompt": "should be ignored", "cfg": 99})
+    for node in graph.values():
+        assert "cfg" not in node["inputs"], node
+        assert "negative" not in node["inputs"], node
+    assert "LoraLoaderModelOnly" not in _class_types(graph)  # no LoRA slot at all
+
+
+def test_h3_graph_no_subgraph_or_definitions_key():
+    graph = build_minimax_h3_graph({"prompt": "x"})
+    assert "definitions" not in graph
+    for node in graph.values():
+        assert "class_type" in node
+
+
+# ---------------------------------------------------------------------------
+# build_minimax_h3_graph: both VAELoaders + CLIPLoader type == "minimax"
+# ---------------------------------------------------------------------------
+
+def test_h3_graph_has_both_vae_loaders_with_right_filenames():
+    graph = build_minimax_h3_graph({"prompt": "x"})
+    vae_names = sorted(n["inputs"]["vae_name"] for n in graph.values() if n["class_type"] == "VAELoader")
+    assert vae_names == sorted([
+        "minimax_h3_video_vae_fp16.safetensors",
+        "minimax_h3_audio_vae_fp32.safetensors",
+    ])
+
+
+def test_h3_graph_vaedecode_and_vaedecodeaudio_reference_the_right_vae_each():
+    graph = build_minimax_h3_graph({"prompt": "x"})
+    video_vae_id = next(nid for nid, n in graph.items()
+                         if n["class_type"] == "VAELoader" and n["inputs"]["vae_name"] == "minimax_h3_video_vae_fp16.safetensors")
+    audio_vae_id = next(nid for nid, n in graph.items()
+                         if n["class_type"] == "VAELoader" and n["inputs"]["vae_name"] == "minimax_h3_audio_vae_fp32.safetensors")
+    decode = next(n for n in graph.values() if n["class_type"] == "VAEDecode")
+    decode_audio = next(n for n in graph.values() if n["class_type"] == "VAEDecodeAudio")
+    assert decode["inputs"]["vae"] == [video_vae_id, 0]
+    assert decode_audio["inputs"]["vae"] == [audio_vae_id, 0]
+    # Both decode the SAME latent output (SamplerCustomAdvanced's single
+    # output) -- video and audio come out of one pass, not two.
+    assert decode["inputs"]["samples"] == decode_audio["inputs"]["samples"]
+
+
+def test_h3_graph_cliploader_type_is_minimax():
+    graph = build_minimax_h3_graph({"prompt": "x"})
+    clip_node = next(n for n in graph.values() if n["class_type"] == "CLIPLoader")
+    assert clip_node["inputs"]["type"] == "minimax"
+    assert clip_node["inputs"]["clip_name"] == "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+
+
+def test_h3_graph_default_unet_filename():
+    graph = build_minimax_h3_graph({"prompt": "x"})
+    unet_node = next(n for n in graph.values() if n["class_type"] == "UNETLoader")
+    assert unet_node["inputs"]["unet_name"] == "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+
+
+# ---------------------------------------------------------------------------
+# build_minimax_h3_graph: MiniMaxH3SigmaShift -- omitted at defaults,
+# inserted (and correctly wired into BOTH consumers) when overridden
+# ---------------------------------------------------------------------------
+
+def test_h3_sigma_shift_omitted_at_defaults():
+    graph = build_minimax_h3_graph({"prompt": "x"})
+    assert "MiniMaxH3SigmaShift" not in _class_types(graph)
+
+
+def test_h3_sigma_shift_not_inserted_when_values_explicitly_match_defaults():
+    # Explicitly passing the SAME values as the defaults must not insert the
+    # node either -- only an actual DIFFERENCE triggers it.
+    graph = build_minimax_h3_graph({"prompt": "x", "shift_video": 12.0, "shift_audio": 3.0})
+    assert "MiniMaxH3SigmaShift" not in _class_types(graph)
+
+
+def test_h3_sigma_shift_inserted_when_video_shift_overridden():
+    graph = build_minimax_h3_graph({"prompt": "x", "shift_video": 15.0})
+    shift_nodes = [n for n in graph.values() if n["class_type"] == "MiniMaxH3SigmaShift"]
+    assert len(shift_nodes) == 1
+    assert shift_nodes[0]["inputs"]["shift_video"] == 15.0
+    assert shift_nodes[0]["inputs"]["shift_audio"] == 3.0  # untouched default filled in
+
+
+def test_h3_sigma_shift_inserted_when_audio_shift_overridden():
+    graph = build_minimax_h3_graph({"prompt": "x", "shift_audio": 5.0})
+    shift_nodes = [n for n in graph.values() if n["class_type"] == "MiniMaxH3SigmaShift"]
+    assert len(shift_nodes) == 1
+    assert shift_nodes[0]["inputs"]["shift_video"] == 12.0
+    assert shift_nodes[0]["inputs"]["shift_audio"] == 5.0
+
+
+def test_h3_sigma_shift_wired_into_both_guider_and_scheduler():
+    graph = build_minimax_h3_graph({"prompt": "x", "shift_video": 20.0})
+    shift_id = next(nid for nid, n in graph.items() if n["class_type"] == "MiniMaxH3SigmaShift")
+    guider = next(n for n in graph.values() if n["class_type"] == "BasicGuider")
+    scheduler = next(n for n in graph.values() if n["class_type"] == "BasicScheduler")
+    assert guider["inputs"]["model"] == [shift_id, 0]
+    assert scheduler["inputs"]["model"] == [shift_id, 0]
+
+
+def test_h3_no_sigma_shift_unet_feeds_guider_and_scheduler_directly():
+    graph = build_minimax_h3_graph({"prompt": "x"})
+    unet_id = next(nid for nid, n in graph.items() if n["class_type"] == "UNETLoader")
+    guider = next(n for n in graph.values() if n["class_type"] == "BasicGuider")
+    scheduler = next(n for n in graph.values() if n["class_type"] == "BasicScheduler")
+    assert guider["inputs"]["model"] == [unet_id, 0]
+    assert scheduler["inputs"]["model"] == [unet_id, 0]
+
+
+# ---------------------------------------------------------------------------
+# build_minimax_h3_graph: first_frame required-in-practice, last_frame
+# genuinely optional
+# ---------------------------------------------------------------------------
+
+def test_h3_graph_without_last_frame_omits_it():
+    graph = build_minimax_h3_graph({"prompt": "x", "input_image": "start.png"})
+    h3 = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ImageToVideo")
+    assert "last_frame" not in h3["inputs"]
+    assert "first_frame" in h3["inputs"]
+    assert _class_types(graph).count("LoadImage") == 1
+
+
+def test_h3_graph_with_last_frame_included():
+    graph = build_minimax_h3_graph({"prompt": "x", "input_image": "start.png", "last_frame": "end.png"})
+    h3 = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ImageToVideo")
+    assert "first_frame" in h3["inputs"]
+    assert "last_frame" in h3["inputs"]
+    assert _class_types(graph).count("LoadImage") == 2
+    load_ids = [nid for nid, n in graph.items() if n["class_type"] == "LoadImage"]
+    assert h3["inputs"]["first_frame"][0] != h3["inputs"]["last_frame"][0]
+    assert set(load_ids) == {h3["inputs"]["first_frame"][0], h3["inputs"]["last_frame"][0]}
+
+
+def test_h3_graph_without_any_frame_is_still_buildable():
+    # Pure, always-buildable function like the other two builders -- text-
+    # only H3 (no first_frame, no last_frame) must not raise.
+    graph = build_minimax_h3_graph({"prompt": "x"})
+    h3 = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ImageToVideo")
+    assert "first_frame" not in h3["inputs"]
+    assert "last_frame" not in h3["inputs"]
+    assert "LoadImage" not in _class_types(graph)
+
+
+def test_h3_start_and_end_frame_use_comfy_image_ref_like_the_other_builders():
+    graph = build_minimax_h3_graph({
+        "prompt": "x",
+        "input_image": "render.png", "input_image_subfolder": "batch1", "input_image_type": "output",
+        "last_frame": "render2.png", "last_frame_subfolder": "batch2", "last_frame_type": "temp",
+    })
+    load_nodes = {n["inputs"]["image"] for n in graph.values() if n["class_type"] == "LoadImage"}
+    assert "batch1/render.png [output]" in load_nodes
+    assert "batch2/render2.png [temp]" in load_nodes
+
+
+def test_h3_introspection_with_only_last_frame_leaves_input_image_none():
+    # DEFECT 11 repro: with ONLY last_frame set (no first_frame/input_image),
+    # the graph has exactly ONE LoadImage node (the end frame). Before this
+    # fix, introspect_graph()'s earlier EmptySD3LatentImage/LoadImage `elif`
+    # chain (there being no EmptySD3LatentImage in an H3 graph) fell to
+    # `elif by_type.get("LoadImage")`, which grabbed that lone LoadImage node
+    # -- really the END frame -- as `input_image`, and the H3 block never
+    # corrected it because first_frame's own ref was absent. Corrupts
+    # gen_params and any re-roll.
+    graph = build_minimax_h3_graph({"prompt": "x", "last_frame": "END.png"})
+    out = introspect_graph(graph)["params"]
+    assert out["input_image"] is None
+    assert out["last_frame"] == "END.png"
+
+
+# ---------------------------------------------------------------------------
+# build_minimax_h3_graph: seed resolution + reproducibility
+# ---------------------------------------------------------------------------
+
+def test_h3_graph_seed_feeds_randomnoise_only():
+    graph = build_minimax_h3_graph({"prompt": "x", "seed": 4242, "randomize_seed": False})
+    noise = next(n for n in graph.values() if n["class_type"] == "RandomNoise")
+    assert noise["inputs"]["noise_seed"] == 4242
+
+
+def test_h3_graph_randomize_seed_or_missing_seed_produces_an_int_in_range():
+    for params in ({"prompt": "x", "randomize_seed": True, "seed": 5}, {"prompt": "x"}):
+        graph = build_minimax_h3_graph(params)
+        noise = next(n for n in graph.values() if n["class_type"] == "RandomNoise")
+        seed = noise["inputs"]["noise_seed"]
+        assert isinstance(seed, int)
+        assert 0 <= seed <= 2**32 - 1
+
+
+def test_h3_graph_identical_seed_and_randomize_false_produces_byte_identical_graphs():
+    params = {
+        "prompt": "a hero rides a motorcycle down a coastal road",
+        "input_image": "start.png", "last_frame": "end.png",
+        "width": 1344, "height": 768, "seconds": 3, "fps": 24,
+        "seed": 42424, "randomize_seed": False, "steps": 20,
+        "sampler": "res_multistep", "scheduler": "simple",
+    }
+    graph_a = build_minimax_h3_graph(dict(params))
+    graph_b = build_minimax_h3_graph(dict(params))
+    assert json.dumps(graph_a, sort_keys=True) == json.dumps(graph_b, sort_keys=True)
+
+
+# ---------------------------------------------------------------------------
+# build_minimax_h3_graph: duration(seconds)/fps/size land on the right nodes
+# + bare-dict defaults
+# ---------------------------------------------------------------------------
+
+def test_h3_graph_length_derived_from_seconds():
+    graph = build_minimax_h3_graph({"prompt": "x", "seconds": 2})
+    h3 = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ImageToVideo")
+    assert h3["inputs"]["length"] == 56
+    graph2 = build_minimax_h3_graph({"prompt": "x", "seconds": 3})
+    h3b = next(n for n in graph2.values() if n["class_type"] == "MiniMaxH3ImageToVideo")
+    assert h3b["inputs"]["length"] == 73
+
+
+def test_h3_graph_width_height_fps_land_on_the_right_nodes():
+    graph = build_minimax_h3_graph({"prompt": "x", "width": 1664, "height": 928, "fps": 30})
+    h3 = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ImageToVideo")
+    assert h3["inputs"]["width"] == 1664
+    assert h3["inputs"]["height"] == 928
+    create_video = next(n for n in graph.values() if n["class_type"] == "CreateVideo")
+    assert create_video["inputs"]["fps"] == 30.0
+
+
+def test_h3_graph_defaults_from_bare_dict():
+    graph = build_minimax_h3_graph({})
+    h3 = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ImageToVideo")
+    assert h3["inputs"]["width"] == 1344
+    assert h3["inputs"]["height"] == 768
+    assert h3["inputs"]["length"] == 56  # seconds default 2.0
+    assert h3["inputs"]["prompt"] == ""
+    create_video = next(n for n in graph.values() if n["class_type"] == "CreateVideo")
+    assert create_video["inputs"]["fps"] == 24.0
+    scheduler = next(n for n in graph.values() if n["class_type"] == "BasicScheduler")
+    assert scheduler["inputs"]["steps"] == 20
+    assert scheduler["inputs"]["denoise"] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# introspect_graph(build_minimax_h3_graph(params)): round-trip + zero
+# unsupported nodes
+# ---------------------------------------------------------------------------
+
+def test_h3_graph_introspection_reports_no_unsupported_nodes():
+    graph = build_minimax_h3_graph({"prompt": "x", "input_image": "s.png", "last_frame": "e.png"})
+    result = introspect_graph(graph)
+    assert result["unsupported"] == []
+
+
+def test_round_trip_h3():
+    params = {
+        "prompt": "a dragon flies over a castle at dawn",
+        "input_image": "start_frame.png",
+        "width": 1344, "height": 768, "seconds": 3, "fps": 24,
+        "seed": 909090, "randomize_seed": False, "steps": 20,
+        "sampler": "res_multistep", "scheduler": "simple",
+    }
+    graph = build_minimax_h3_graph(params)
+    out = introspect_graph(graph)["params"]
+
+    assert out["prompt"] == params["prompt"]
+    assert "negative_prompt" not in out  # H3 has no negative prompt at all -- DEFECT 19
+    assert "cfg" not in out
+    assert out["seed"] == 909090
+    assert out["sampler"] == "res_multistep"
+    assert out["scheduler"] == "simple"
+    assert out["steps"] == 20
+    assert out["width"] == 1344
+    assert out["height"] == 768
+    assert out["frames"] == 73  # _h3_length(3)
+    # DEFECT 19: recovered as length/fps (the graph's actual duration), not a
+    # lossless inverse of the original "seconds" -- _h3_length() rounds UP to
+    # satisfy H3's mod-17 constraint, so 3 requested seconds really renders
+    # 73/24 = 3.0417s.
+    assert out["seconds"] == 73 / 24.0
+    assert out["input_image"] == "start_frame.png"
+    assert out["unet"] == "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+    assert out["clip"] == "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+    assert out["clip_type"] == "minimax"
+    assert out["vae"] == "minimax_h3_video_vae_fp16.safetensors"
+    assert out["audio_vae"] == "minimax_h3_audio_vae_fp32.safetensors"
+    assert out["fps"] == 24.0
+
+
+def test_round_trip_h3_with_last_frame():
+    params = {"prompt": "x", "input_image": "start.png", "last_frame": "end.png", "randomize_seed": False, "seed": 1}
+    graph = build_minimax_h3_graph(params)
+    out = introspect_graph(graph)["params"]
+    assert out["input_image"] == "start.png"
+    assert out["last_frame"] == "end.png"
+
+
+# ---------------------------------------------------------------------------
+# apply_model_preset() reused for VIDEO presets (data/studio/scripts/
+# models.json's new `video_models` section) -- widened field lists
+# ---------------------------------------------------------------------------
+
+def test_apply_model_preset_fills_h3_only_fields():
+    preset = {
+        "unet": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "clip": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "clip_type": "minimax",
+        "vae": "minimax_h3_video_vae_fp16.safetensors",
+        "audio_vae": "minimax_h3_audio_vae_fp32.safetensors",
+        "defaults": {
+            "steps": 20, "sampler": "res_multistep", "scheduler": "simple",
+            "seconds": 2, "fps": 24, "shift_video": 12.0, "shift_audio": 3.0,
+            "size": "1344x768",
+        },
+    }
+    out = apply_model_preset({"prompt": "x"}, preset)
+    assert out["unet"] == "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+    assert out["clip_type"] == "minimax"
+    assert out["audio_vae"] == "minimax_h3_audio_vae_fp32.safetensors"
+    assert out["steps"] == 20
+    assert out["sampler"] == "res_multistep"
+    assert out["seconds"] == 2
+    assert out["fps"] == 24
+    assert out["shift_video"] == 12.0
+    assert out["shift_audio"] == 3.0
+    assert out["width"] == 1344
+    assert out["height"] == 768
+
+
+def test_apply_model_preset_fills_unet_low_for_wan_style_preset():
+    preset = {
+        "unet": "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+        "unet_low": "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+        "defaults": {"fps": 16, "frames": 81},
+    }
+    out = apply_model_preset({"prompt": "x"}, preset)
+    assert out["unet_low"] == "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"
+    assert out["fps"] == 16
+    assert out["frames"] == 81
+
+
+def test_apply_model_preset_video_only_fields_absent_for_an_image_only_preset():
+    # An IMAGE preset's defaults never declares these -- confirms the widened
+    # field lists are purely additive (every pre-existing apply_model_preset
+    # test above must keep passing unchanged; this asserts the negative case
+    # explicitly).
+    preset = {"unet": "z_image_bf16.safetensors", "defaults": {"steps": 30}}
+    out = apply_model_preset({"prompt": "x"}, preset)
+    assert "unet_low" not in out
+    assert "audio_vae" not in out
+    assert "seconds" not in out
+    assert "fps" not in out
+    assert "shift_video" not in out
+    assert "shift_audio" not in out
+
+
+# ---------------------------------------------------------------------------
+# resolve_model_entries(): unet_low / audio_vae availability (video_models)
+# ---------------------------------------------------------------------------
+
+def test_resolve_model_entries_checks_unet_low_when_present():
+    entries = [{"key": "wan22_i2v", "unet": "high.safetensors", "unet_low": "low.safetensors",
+                "clip": "clip.safetensors", "vae": "vae.safetensors"}]
+    live_missing_low = {"unets": ["high.safetensors"], "clips": ["clip.safetensors"], "vaes": ["vae.safetensors"]}
+    out = resolve_model_entries(entries, live_missing_low)
+    assert out[0]["available"] is False
+    assert out[0]["missing"] == ["unet_low"]
+
+    live_has_both = {"unets": ["high.safetensors", "low.safetensors"], "clips": ["clip.safetensors"], "vaes": ["vae.safetensors"]}
+    out2 = resolve_model_entries(entries, live_has_both)
+    assert out2[0]["available"] is True
+    assert out2[0]["missing"] == []
+
+
+def test_resolve_model_entries_checks_audio_vae_when_present():
+    entries = [{"key": "minimax_h3", "unet": "u.safetensors", "clip": "c.safetensors",
+                "vae": "video.safetensors", "audio_vae": "audio.safetensors"}]
+    live_missing_audio = {"unets": ["u.safetensors"], "clips": ["c.safetensors"], "vaes": ["video.safetensors"]}
+    out = resolve_model_entries(entries, live_missing_audio)
+    assert out[0]["available"] is False
+    assert out[0]["missing"] == ["audio_vae"]
+
+    live_has_both = {"unets": ["u.safetensors"], "clips": ["c.safetensors"], "vaes": ["video.safetensors", "audio.safetensors"]}
+    out2 = resolve_model_entries(entries, live_has_both)
+    assert out2[0]["available"] is True
+    assert out2[0]["missing"] == []
+
+
+def test_resolve_model_entries_unet_low_and_audio_vae_absent_is_not_missing():
+    # An entry that never declares these two (every IMAGE preset) must be
+    # completely unaffected -- "nothing declared for this slot" already
+    # means "nothing to check" (same contract as unet/clip/vae).
+    entries = [{"key": "studio_toei", "unet": "u.safetensors", "clip": "c.safetensors", "vae": "v.safetensors"}]
+    live = {"unets": ["u.safetensors"], "clips": ["c.safetensors"], "vaes": ["v.safetensors"]}
+    out = resolve_model_entries(entries, live)
+    assert out[0]["available"] is True
+    assert out[0]["missing"] == []
+
+
+# ---------------------------------------------------------------------------
+# video_models registry: real repo file + full end-to-end preset -> graph
+# ---------------------------------------------------------------------------
+
+def test_load_model_registry_video_models_against_real_repo_registry():
+    real_path = _REPO_ROOT / "data" / "studio" / "scripts" / "models.json"
+    if not real_path.is_file():
+        raise Skip("data/studio/scripts/models.json not present (gitignored; expected on a fresh clone)")
+    reg = load_model_registry(str(real_path))
+    assert "wan22_i2v" in reg.get("video_models", {})
+    assert "minimax_h3" in reg.get("video_models", {})
+    assert reg.get("default_video_model") == "wan22_i2v"
+    h3 = reg["video_models"]["minimax_h3"]
+    assert h3["clip_type"] == "minimax"
+    assert h3.get("has_audio") is True
+    assert h3["defaults"]["seconds"] == 2
+    assert h3["defaults"]["fps"] == 24
+    assert h3["defaults"]["steps"] == 20
+    assert h3["defaults"]["sampler"] == "res_multistep"
+    assert h3["defaults"]["scheduler"] == "simple"
+    wan = reg["video_models"]["wan22_i2v"]
+    assert wan.get("has_audio") is not True
+
+
+def test_h3_preset_against_real_repo_registry_end_to_end():
+    real_path = _REPO_ROOT / "data" / "studio" / "scripts" / "models.json"
+    if not real_path.is_file():
+        raise Skip("data/studio/scripts/models.json not present (gitignored; expected on a fresh clone)")
+    registry = load_model_registry(str(real_path))
+    preset = registry["video_models"]["minimax_h3"]
+    params = apply_model_preset({"prompt": "x"}, preset)
+    graph = build_minimax_h3_graph(params)
+
+    clip_node = next(n for n in graph.values() if n["class_type"] == "CLIPLoader")
+    assert clip_node["inputs"]["type"] == "minimax"
+
+    h3 = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ImageToVideo")
+    assert h3["inputs"]["width"] == 1344
+    assert h3["inputs"]["height"] == 768
+    assert h3["inputs"]["length"] == 56  # seconds=2 default -> _h3_length(2)
+
+    vae_names = sorted(n["inputs"]["vae_name"] for n in graph.values() if n["class_type"] == "VAELoader")
+    assert vae_names == sorted(["minimax_h3_video_vae_fp16.safetensors", "minimax_h3_audio_vae_fp32.safetensors"])
+
+    result = introspect_graph(graph)
+    assert result["unsupported"] == []
+
+
+def test_wan_preset_against_real_repo_video_registry_end_to_end():
+    real_path = _REPO_ROOT / "data" / "studio" / "scripts" / "models.json"
+    if not real_path.is_file():
+        raise Skip("data/studio/scripts/models.json not present (gitignored; expected on a fresh clone)")
+    registry = load_model_registry(str(real_path))
+    preset = registry["video_models"]["wan22_i2v"]
+    params = apply_model_preset({"prompt": "x"}, preset)
+    graph = build_wan_i2v_graph(params)
+
+    unet_names = sorted(n["inputs"]["unet_name"] for n in graph.values() if n["class_type"] == "UNETLoader")
+    assert unet_names == sorted([
+        "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+        "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+    ])
+    clip_node = next(n for n in graph.values() if n["class_type"] == "CLIPLoader")
+    assert clip_node["inputs"]["type"] == "wan"
+
 
 def _run_all():
     tests = [(name, obj) for name, obj in sorted(globals().items())

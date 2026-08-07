@@ -1473,6 +1473,58 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
   return wrap;
 }
 
+// Video extensions landed by the Image/Video tabs' ComfyUI backend
+// (routes/comfy_routes.py's _ALLOWED_EXTS / src/generated_images.py's
+// GENERATED_IMAGE_RE) -- shared by the live job-completion bubble
+// (genParams.js's _onJobDone) and the history-reconstruction path below, so
+// a video turn renders the same way live and after a reload.
+const _VIDEO_URL_RE = /\.(mp4|mov|webm|mkv|m4v)(?:[?#]|$)/i;
+
+/**
+ * Build a generated-video bubble element (Image/Video tab video results).
+ * Deliberately simpler than buildImageBubble (no copy/download/reuse/edit/
+ * gallery footer actions) -- promoted here from a genParams.js-local helper
+ * so both the live job-completion path and the persisted-history
+ * reconstruction path (addMessage() below) render a video turn identically.
+ */
+export function buildVideoBubble(videoUrl, prompt) {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg msg-ai generated-video-wrap';
+  wrap.dataset.imageUrl = videoUrl || '';
+
+  const role = document.createElement('div');
+  role.className = 'role';
+  role.textContent = 'video';
+  wrap.appendChild(role);
+
+  const body = document.createElement('div');
+  body.className = 'body';
+
+  const safeVideoUrl = safeDisplayImageSrc(videoUrl);
+  if (!safeVideoUrl) {
+    body.textContent = '[Video unavailable]';
+    wrap.appendChild(body);
+    return wrap;
+  }
+
+  const video = document.createElement('video');
+  video.className = 'generated-video';
+  video.src = safeVideoUrl;
+  video.controls = true;
+  video.loop = true;
+  body.appendChild(video);
+
+  if (prompt) {
+    const caption = document.createElement('div');
+    caption.className = 'generated-image-caption';
+    caption.textContent = prompt;
+    body.appendChild(caption);
+  }
+
+  wrap.appendChild(body);
+  return wrap;
+}
+
 export function hideWelcomeScreen() {
   const ws = document.getElementById('welcome-screen');
   const cc = document.getElementById('chat-container');
@@ -2431,7 +2483,13 @@ export function addMessage(role, content, modelName, metadata) {
 
           for (const ev of roundTools) {
             if (ev.image_url) {
-              box.appendChild(buildImageBubble(ev.image_url, ev.image_prompt, ev.image_model, ev.image_size, ev.image_quality, ev.image_id));
+              // Image/Video tabs (routes/comfy_routes.py's _write_terminal_turn)
+              // land BOTH kinds through the same ev.image_url field -- tell
+              // them apart by extension, same as genParams.js's own live
+              // _onJobDone() already does for the transient bubble.
+              box.appendChild(_VIDEO_URL_RE.test(ev.image_url)
+                ? buildVideoBubble(ev.image_url, ev.image_prompt)
+                : buildImageBubble(ev.image_url, ev.image_prompt, ev.image_model, ev.image_size, ev.image_quality, ev.image_id));
             }
           }
         }
