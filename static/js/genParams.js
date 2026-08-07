@@ -1365,7 +1365,22 @@ function _forgetInflight(jobId) {
 }
 
 function _isCurrentSession(sessionId) {
-  const current = _currentSessionId || (sessionModule.getCurrentSessionId ? sessionModule.getCurrentSessionId() : null);
+  // Ask the session module FIRST and use our own cached id only as a fallback.
+  //
+  // This order matters and used to be reversed. `_currentSessionId` is only
+  // written by onSessionSwitch(), which fires when you SWITCH sessions -- not
+  // when a new chat is created. So starting a fresh chat and generating in it
+  // left `_currentSessionId` pointing at the previous session, this returned
+  // false for a job whose sessionId was perfectly correct, and _onJobDone()
+  // silently skipped painting the result. Combined with the unconditional
+  // holder.remove() above it, the progress bubble just vanished and nothing
+  // replaced it -- the render was fine, in the Gallery and in the DB, but the
+  // UI showed no completion at all. Reported live 2026-08-07.
+  //
+  // sessionModule.getCurrentSessionId() is the authority; the cache is only
+  // there for the case where the module hasn't exposed the getter.
+  const live = sessionModule.getCurrentSessionId ? sessionModule.getCurrentSessionId() : null;
+  const current = live || _currentSessionId;
   return !!sessionId && sessionId === current;
 }
 
@@ -1690,6 +1705,18 @@ function _onJobDone(job, data) {
       if (box) box.appendChild(bubble);
     });
     if (box) scrollHistory();
+  } else {
+    // Belt-and-braces: the holder was already removed unconditionally above,
+    // so if we get here the user sees the progress bubble disappear with
+    // NOTHING replacing it -- which reads as "the render silently died" even
+    // though it succeeded. That exact confusion was reported 2026-08-07.
+    // Never fail silently: say where the result went. (This is now the
+    // genuine cross-session case only -- the stale-cache false negative that
+    // used to land here is fixed in _isCurrentSession().)
+    const n = images.length;
+    showToast(n
+      ? `${job.kind === 'video' ? 'Video' : 'Image'} finished in another chat - saved to the Gallery.`
+      : 'Generation finished - saved to the Gallery.');
   }
   window.dispatchEvent(new CustomEvent('gallery-refresh', { detail: { source: 'genParams' } }));
   _finishJob(job);
