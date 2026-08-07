@@ -861,9 +861,14 @@ DEFAULT_H3_CLIP_TYPE = "minimax"  # NOT "lumina2"/"qwen_image"/"wan" -- a distin
 DEFAULT_H3_CLIP_DEVICE = "default"
 DEFAULT_H3_VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
 DEFAULT_H3_AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
-DEFAULT_H3_WIDTH = 1344
-DEFAULT_H3_HEIGHT = 768
-DEFAULT_H3_SECONDS = 2.0  # -> _h3_length() = 56; matches data/studio/scripts/models.json's minimax_h3 preset default
+# The official 0.4MP 16:9 preview baseline, and the ONLY configuration
+# verified end-to-end on this machine (2026-08-06: 864x480 / 124 frames /
+# 20 steps produced MiniMax_H3_00001_.mp4 with both video and audio tracks).
+# 1344x768 is H3's native canvas and is offered in models.json, but it is a
+# "scale up after a clean run" target, not a safe default.
+DEFAULT_H3_WIDTH = 864
+DEFAULT_H3_HEIGHT = 480
+DEFAULT_H3_SECONDS = 5.0  # -> _h3_length() = 124, the trained-range minimum
 DEFAULT_H3_FPS = 24.0
 DEFAULT_H3_STEPS = 20
 DEFAULT_H3_SAMPLER = "res_multistep"
@@ -873,6 +878,14 @@ DEFAULT_H3_SHIFT_AUDIO = 3.0
 DEFAULT_H3_FILENAME_PREFIX = "video/MiniMax_H3"
 DEFAULT_H3_FORMAT = "auto"
 DEFAULT_H3_CODEC = "auto"
+
+
+# MiniMax H3's trained frame range starts around 124 frames (ComfyUI's own
+# guidance is "5-15 requested seconds" @ 24fps). Below this the model does not
+# produce a short clip -- it fails in VAEDecodeAudio with a device-mismatch
+# error that looks nothing like "your duration is too short". Proven
+# 2026-08-06: length=56 fails, length=124 succeeds on the identical graph.
+_H3_MIN_FRAMES = 124
 
 
 def _h3_length(seconds: float) -> int:
@@ -893,8 +906,22 @@ def _h3_length(seconds: float) -> int:
     always satisfies `length % 17 == 5` for ANY non-negative `L` -- a plain
     modular-arithmetic identity of the formula itself, not something that
     depends on round()'s tie-breaking rule.
+
+    TRAINED-RANGE FLOOR (added 2026-08-06, proven empirically):
+    H3's documented trained range is ~124-362 frames, and ComfyUI's guidance
+    is "5-15 requested seconds". Asking for LESS does not merely give a short
+    clip -- it fails, deep in the graph, with a misleading error. Every run at
+    seconds=2 (length=56) died in VAEDecodeAudio with
+    "Input type (torch.cuda.FloatTensor) and weight type (torch.FloatTensor)
+    should be the same", which reads like a device-placement bug and sent us
+    chasing --gpu-only for hours (PLAN-IMAGE-VIDEO-TABS.md 14.14/14.17).
+    The identical graph at seconds=5 (length=124) succeeds, audio track and
+    all. So: clamp UP to the trained minimum rather than letting a caller
+    request a length the model cannot produce. Clamping is right here instead
+    of raising -- a slightly longer clip is a far better outcome than an
+    opaque failure 6 minutes into a render.
     """
-    L = max(5, round(seconds * 24))
+    L = max(_H3_MIN_FRAMES, round(seconds * 24))
     return L + ((5 - (L % 17)) % 17)
 
 

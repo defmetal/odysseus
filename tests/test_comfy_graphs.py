@@ -1321,13 +1321,22 @@ def test_negative_prompt_explicit_value_passes_through():
 # ---------------------------------------------------------------------------
 
 def test_h3_length_helper_several_values():
-    assert _h3_length(2) == 56   # the authoritative template's own worked example
-    assert _h3_length(0) == 5
-    assert _h3_length(1) == 39
-    assert _h3_length(3) == 73
-    assert _h3_length(4) == 107
-    assert _h3_length(5) == 124  # matches EmptyMiniMaxH3LatentAV's own node default (length=124)
+    # 5s -> 124 is the anchor: it matches EmptyMiniMaxH3LatentAV's own node
+    # default AND ComfyUI's documented "5 seconds becomes 124 frames".
+    assert _h3_length(5) == 124
+    assert _h3_length(8) == 192
     assert _h3_length(10) == 243
+    assert _h3_length(15) == 362   # top of the documented trained range
+
+
+def test_h3_length_clamps_up_to_the_trained_minimum():
+    """Anything under ~124 frames is OUTSIDE H3's trained range and does not
+    render -- it dies in VAEDecodeAudio with a device-mismatch error that
+    looks like a bug elsewhere entirely. Proven 2026-08-06: the identical
+    graph fails at length=56 and succeeds at length=124. So short requests
+    clamp UP rather than producing an unrenderable graph."""
+    for seconds in (0, 0.5, 1, 2, 3, 4, 4.9):
+        assert _h3_length(seconds) == 124, seconds
 
 
 def test_h3_length_always_satisfies_mod17_constraint():
@@ -1561,7 +1570,7 @@ def test_h3_graph_identical_seed_and_randomize_false_produces_byte_identical_gra
     params = {
         "prompt": "a hero rides a motorcycle down a coastal road",
         "input_image": "start.png", "last_frame": "end.png",
-        "width": 1344, "height": 768, "seconds": 3, "fps": 24,
+        "width": 1344, "height": 768, "seconds": 8, "fps": 24,
         "seed": 42424, "randomize_seed": False, "steps": 20,
         "sampler": "res_multistep", "scheduler": "simple",
     }
@@ -1576,12 +1585,12 @@ def test_h3_graph_identical_seed_and_randomize_false_produces_byte_identical_gra
 # ---------------------------------------------------------------------------
 
 def test_h3_graph_length_derived_from_seconds():
-    graph = build_minimax_h3_graph({"prompt": "x", "seconds": 2})
+    graph = build_minimax_h3_graph({"prompt": "x", "seconds": 5})
     h3 = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ImageToVideo")
-    assert h3["inputs"]["length"] == 56
-    graph2 = build_minimax_h3_graph({"prompt": "x", "seconds": 3})
+    assert h3["inputs"]["length"] == 124
+    graph2 = build_minimax_h3_graph({"prompt": "x", "seconds": 8})
     h3b = next(n for n in graph2.values() if n["class_type"] == "MiniMaxH3ImageToVideo")
-    assert h3b["inputs"]["length"] == 73
+    assert h3b["inputs"]["length"] == 192
 
 
 def test_h3_graph_width_height_fps_land_on_the_right_nodes():
@@ -1596,9 +1605,9 @@ def test_h3_graph_width_height_fps_land_on_the_right_nodes():
 def test_h3_graph_defaults_from_bare_dict():
     graph = build_minimax_h3_graph({})
     h3 = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ImageToVideo")
-    assert h3["inputs"]["width"] == 1344
-    assert h3["inputs"]["height"] == 768
-    assert h3["inputs"]["length"] == 56  # seconds default 2.0
+    assert h3["inputs"]["width"] == 864
+    assert h3["inputs"]["height"] == 480
+    assert h3["inputs"]["length"] == 124  # seconds default 5.0 (trained-range minimum)
     assert h3["inputs"]["prompt"] == ""
     create_video = next(n for n in graph.values() if n["class_type"] == "CreateVideo")
     assert create_video["inputs"]["fps"] == 24.0
@@ -1622,7 +1631,7 @@ def test_round_trip_h3():
     params = {
         "prompt": "a dragon flies over a castle at dawn",
         "input_image": "start_frame.png",
-        "width": 1344, "height": 768, "seconds": 3, "fps": 24,
+        "width": 1344, "height": 768, "seconds": 8, "fps": 24,
         "seed": 909090, "randomize_seed": False, "steps": 20,
         "sampler": "res_multistep", "scheduler": "simple",
     }
@@ -1638,12 +1647,12 @@ def test_round_trip_h3():
     assert out["steps"] == 20
     assert out["width"] == 1344
     assert out["height"] == 768
-    assert out["frames"] == 73  # _h3_length(3)
+    assert out["frames"] == 192  # _h3_length(8)
     # DEFECT 19: recovered as length/fps (the graph's actual duration), not a
     # lossless inverse of the original "seconds" -- _h3_length() rounds UP to
-    # satisfy H3's mod-17 constraint, so 3 requested seconds really renders
-    # 73/24 = 3.0417s.
-    assert out["seconds"] == 73 / 24.0
+    # satisfy H3's mod-17 constraint. Here 8 requested seconds lands exactly on
+    # 192 frames, so 192/24 == 8.0; for other inputs the two can differ.
+    assert out["seconds"] == 192 / 24.0
     assert out["input_image"] == "start_frame.png"
     assert out["unet"] == "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
     assert out["clip"] == "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
@@ -1778,7 +1787,7 @@ def test_load_model_registry_video_models_against_real_repo_registry():
     h3 = reg["video_models"]["minimax_h3"]
     assert h3["clip_type"] == "minimax"
     assert h3.get("has_audio") is True
-    assert h3["defaults"]["seconds"] == 2
+    assert h3["defaults"]["seconds"] == 5
     assert h3["defaults"]["fps"] == 24
     assert h3["defaults"]["steps"] == 20
     assert h3["defaults"]["sampler"] == "res_multistep"
@@ -1800,9 +1809,9 @@ def test_h3_preset_against_real_repo_registry_end_to_end():
     assert clip_node["inputs"]["type"] == "minimax"
 
     h3 = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ImageToVideo")
-    assert h3["inputs"]["width"] == 1344
-    assert h3["inputs"]["height"] == 768
-    assert h3["inputs"]["length"] == 56  # seconds=2 default -> _h3_length(2)
+    assert h3["inputs"]["width"] == 864
+    assert h3["inputs"]["height"] == 480
+    assert h3["inputs"]["length"] == 124  # seconds=5 default -> _h3_length(5)
 
     vae_names = sorted(n["inputs"]["vae_name"] for n in graph.values() if n["class_type"] == "VAELoader")
     assert vae_names == sorted(["minimax_h3_video_vae_fp16.safetensors", "minimax_h3_audio_vae_fp32.safetensors"])
