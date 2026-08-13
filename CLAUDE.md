@@ -74,10 +74,33 @@ Suggested first read for a fresh agent: ARCHITECTURE.md then ODYSSEUS.md.
   `z_image_bf16` = our Z-Image BASE merged from local shards, studio LoRAs shared
   via extra_model_paths.yaml). Saved studio workflows in
   `ComfyUI/user/default/workflows/` ("Studio - …": Tetsuya wide, Style-only BGs,
-  Restyle img2img, Ride video). Wan gotchas + full detail:
+  Restyle ANY/as-Tetsuya, New-image-in-style, Ride video). Wan gotchas + detail:
   `data/studio/comfy/` + BRIDGE.md 2026-07-31 entries. Template tiles with an
   "API" badge (Wan2.6/2.7) are PAID CLOUD — never use. Comfy renders land in
   `data/studio/comfy/output/`.
+- **Image/Video tabs (2026-08-04, LIVE): 4-way mode toggle (Chat/Agent/Image/
+  Video) in the web UI, ComfyUI-backed** via `src/comfy_{client,graphs}.py` +
+  `routes/comfy_routes.py` (comfy_base_url default host.docker.internal:8188).
+  Params popup (Simple/Advanced), saved-workflow presets, per-step progress,
+  results land in Gallery with `gen_params` for re-rolls. Upstream RFC drafted:
+  `data/studio/UPSTREAM-RFC-DRAFT.md`.
+- **NVFP4 vLLM serving (2026-08-05): Qwen3.6-27B (67 tok/s) + 35B-A3B (57 tok/s)**
+  on :8500 (container-internal), 131K ctx, fp8 KV, `--reasoning-parser qwen3`
+  (REQUIRED — without it answers hide in thinking and narrated searches re-trigger
+  the text tool parser). MANUAL one-at-a-time serving (~29GB VRAM, excludes image
+  gen): launchers `data/studio/scripts/vllm_serve_{27b,35b}.sh` via
+  `docker exec` (PowerShell) — each SELF-REGISTERS so the dropdown only ever
+  lists the live model. Sleep-mode auto-swap is BUILT but BLOCKED BY WSL (no CUDA
+  VMM); works if this box ever runs native Linux. 13-boot fix chain in BRIDGE.md.
+- **Characters registry:** `tetsuya_oc` (char v5@6000) and `yuki_oc` (v1@6000,
+  gates pending) in `data/studio/scripts/characters.json`. Per-character canon
+  lives at `dataset/characters/<Name>/COLOR_KEY.txt` (usakochiba-signed; the
+  settei-crop factory + grok round playbook is in memory + BRIDGE 2026-08-07).
+- **Fleet north star (2026-08-05):** future Mac = always-on Odysseus host;
+  this box = on-demand CUDA node (image/video/NVFP4/training). Details in
+  Cowork memory; migration is its own session when hardware lands.
+- **Live transparency:** `data/studio/RUNNING.md` = what Cowork has active on
+  this machine right now; `data/studio/_bridge/BRIDGE.md` = the cross-agent log.
 
 ## How generation works (for explaining to the user)
 - **Agent chat** (uncensored `qwen3-vl-abliterated:8b`): "generate 3 images of …",
@@ -88,6 +111,38 @@ Suggested first read for a fresh agent: ARCHITECTURE.md then ODYSSEUS.md.
 - **Model dropdown**: pick `cydonia-24b` for serious fiction prose; the 27B
   default already won't refuse for everyday chat.
 - Results land in the Gallery. No style trigger needed.
+
+## Working style for Claude 5-era models (Opus 5 / Fable 5) — differs from Opus 4.x
+Opus 5 self-verifies, self-corrects, and completes whole tasks by default; it also
+runs longer, narrates more, and will widen scope on its own judgment. Instruction
+changes that get the best results here (per Anthropic's Opus 5 prompting guide):
+- **Scope rule (the house default):** Deliver what was asked, at the scope
+  intended. Make routine judgment calls yourself; check in only when different
+  readings of the request would lead to materially different work. If the request
+  seems mistaken or a better approach exists, SAY SO IN A SENTENCE and continue
+  with the task as asked — don't quietly narrow, widen, or transform it. Finish
+  the whole task; stop short of actions clearly beyond it.
+- **DON'T add "verify your work" / "double-check" instructions** — Opus 5 already
+  does this; explicit verification steps cause expensive over-verification. Same
+  for re-check scaffolding in prompts. (Checklists of WHAT to test are fine —
+  e.g. "after rebuild: image gen both variants, agent tools load".)
+- **Narration cadence:** one sentence before the first tool call; brief updates
+  only on findings or direction changes; finish outcome-first ("what happened"
+  in the first sentence, detail after).
+- **Written deliverables:** match length to substance; no filler sections,
+  boilerplate, or redundant summaries.
+- **Subagents:** delegate only large, genuinely independent parallel tracks
+  (e.g. wide multi-file investigations). Don't delegate what fits in a handful
+  of tool calls; never spawn subagents just to verify own work; prefer one over
+  several. (Sonnet workers for parallel implementation remain the house pattern —
+  this rule is about not letting Opus 5 over-delegate small things.)
+- **Give the whole spec up front** and let it run — Opus 5 is strongest on
+  complete task specifications with full autonomy (our plan-first-markdown habit
+  is exactly right; keep doing it).
+- **Code review asks:** never say "only report high-severity" — it will comply
+  literally and under-report. Ask for everything, filter afterward.
+- Effort (Claude Code setting): default `high`; reserve `xhigh` for the hardest
+  agentic/coding work — lower effort on Opus 5 outperforms xhigh on prior models.
 
 ## Operating notes / gotchas (the short list — full list in HANDOFF.md)
 - After reboot: run `data/studio/resume-after-reboot.bat` (brings the stack up +
