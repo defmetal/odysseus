@@ -511,8 +511,8 @@ Common internal-only ports from the default docs/compose setup:
 ## Image / Video / Music
 
 Optional composer chips (Image, Video, Music) stay hidden until a backend is
-available. Connect your own ComfyUI and/or set `MINIMAX_API_KEY`. Studio
-LoRAs and style packs are out of scope. See
+available. Connect your own ComfyUI and/or set `MINIMAX_API_KEY`. No custom
+LoRAs or style packs are required. See
 [Image, Video, and Music generation](media-generation.md).
 
 ## Configuration

@@ -8,12 +8,12 @@ def test_filename_regex_accepts_generic_hashes():
     assert GENERATED_AUDIO_RE.fullmatch("abcd1234ef567890.mp3")
     assert GENERATED_AUDIO_RE.fullmatch("aa" * 8 + ".wav")
     assert not GENERATED_AUDIO_RE.fullmatch("../secret.mp3")
-    assert not GENERATED_AUDIO_RE.fullmatch("toei90s.mp3")
-    assert not GENERATED_AUDIO_RE.fullmatch("smoon.wav")
+    assert not GENERATED_AUDIO_RE.fullmatch("not-a-hash.mp3")
+    assert not GENERATED_AUDIO_RE.fullmatch("readme.wav")
 
 
 def test_resolve_rejects_invalid_names():
-    for name in ("../etc/passwd", "smoon.mp3", "studio_toei.wav", ""):
+    for name in ("../etc/passwd", "not-a-hash.mp3", "readme.wav", ""):
         try:
             resolve_generated_audio_path(name)
             assert False, name

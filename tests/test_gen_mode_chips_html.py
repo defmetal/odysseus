@@ -15,9 +15,6 @@ def test_index_has_hidden_image_video_music_chips():
     assert 'id="gen-params-wrap"' in html
     assert 'id="set-comfyBaseUrl"' in html
     assert 'id="set-musicEnabledToggle"' in html
-    assert "smoon" not in html
-    assert "toei90s" not in html
-    assert "studio_toei" not in html
 
 
 def test_app_js_hides_chips_from_status():

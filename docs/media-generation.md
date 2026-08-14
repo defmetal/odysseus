@@ -1,6 +1,6 @@
 # Image, Video, and Music generation
 
-Odysseus can add **Image**, **Video**, and **Music** chips next to Agent / Chat. They stay hidden until a backend is actually available. This is a generic, discovery-driven composer — connect **your** ComfyUI and/or a MiniMax Music 3 key. Studio LoRAs, character packs, and style prefixes are out of scope.
+Odysseus can add **Image**, **Video**, and **Music** chips next to Agent / Chat. They stay hidden until a backend is actually available. This is a generic, discovery-driven composer — connect **your** ComfyUI and/or a MiniMax Music 3 key. No custom LoRAs, character packs, or style prefixes are required.
 
 An optional compose overlay is **not** in the default stack.
 
