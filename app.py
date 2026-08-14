@@ -630,13 +630,24 @@ app.include_router(auth_router)
 
 @app.post("/api/activity/heartbeat")
 async def activity_heartbeat():
-    from src.interactive_gate import mark_browser_activity
+    from src.interactive_gate import (
+        mark_browser_activity,
+        maybe_stop_background_tasks_for_heartbeat,
+    )
+
     await mark_browser_activity()
+
     async def _stop_background():
         try:
-            await task_scheduler.stop_background_tasks_for_foreground(reason="browser heartbeat")
+            await maybe_stop_background_tasks_for_heartbeat(
+                task_scheduler.stop_background_tasks_for_foreground
+            )
         except Exception:
-            logging.getLogger("app.foreground_gate").debug("heartbeat task stop failed", exc_info=True)
+            logging.getLogger("app.foreground_gate").debug(
+                "heartbeat task stop failed",
+                exc_info=True,
+            )
+
     asyncio.create_task(_stop_background())
     return {"ok": True}
 
@@ -739,7 +750,7 @@ app.include_router(setup_stt_routes(stt_service))
 logger.info("STT service initialized (provider managed via settings)")
 
 # Documents (artifacts/canvas)
-from routes.document_routes import setup_document_routes
+from routes.document.document_routes import setup_document_routes
 document_router = setup_document_routes(session_manager, upload_handler)
 app.include_router(document_router)
 
@@ -809,7 +820,7 @@ app.include_router(setup_font_routes())
 # MCP (Model Context Protocol)
 from src.mcp_manager import McpManager
 from src.agent_tools import set_mcp_manager
-from routes.mcp_routes import setup_mcp_routes
+from routes.mcp.mcp_routes import setup_mcp_routes
 
 mcp_manager = McpManager()
 set_mcp_manager(mcp_manager)
@@ -824,7 +835,7 @@ set_ai_rag_manager(rag_manager, personal_docs_mgr)
 logger.info("AI interaction tools initialized (session, memory, RAG, UI control)")
 
 # Webhooks
-from routes.webhook_routes import setup_webhook_routes
+from routes.webhook.webhook_routes import setup_webhook_routes
 app.include_router(setup_webhook_routes(webhook_manager, auth_manager, session_manager, api_key_manager))
 
 # API Tokens
@@ -856,7 +867,7 @@ app.include_router(setup_codex_routes(
 ))
 app.include_router(setup_claude_routes())
 
-from routes.vault_routes import setup_vault_routes
+from routes.vault.vault_routes import setup_vault_routes
 app.include_router(setup_vault_routes())
 
 # Contacts (CardDAV)
