@@ -76,11 +76,7 @@ const IMAGE_BASELINE = Object.freeze({
 });
 const VIDEO_BASELINE = Object.freeze({
   workflow: 'Custom',
-  model: 'wan22_i2v',       // the connected Comfy catalog `video_models` preset key --
-                             // same pre-options-load-floor / live-fallback-chain role as
-                             // IMAGE_BASELINE.model (see _effectiveVideoModelKey()). Matches
-                             // wan22_i2v's OWN defaults below (steps/cfg/sampler/frames/fps),
-                             // same reasoning as IMAGE_BASELINE matching zimage_general's.
+  model: '',                // discovery-only: first available video catalog model after /api/comfy/options loads
   input_image: null,        // {comfy_filename|gallery_filename, name, ...} -- START frame (both engines); see IMAGE_BASELINE.input_image re: DEFECT 18
   last_frame: null,         // same shape -- OPTIONAL end frame (MiniMax H3 only)
   frames: 81,                // Wan-only: WanImageToVideo's raw frame count
@@ -677,7 +673,7 @@ function _modelEntry(key) {
 }
 
 // Resolution order: this session/kind's stored choice -> the live Comfy
-// catalog default from /api/comfy/options. No hardcoded studio/model lock-in.
+// catalog default from /api/comfy/options. Discovery-only — no hardcoded model.
 function _effectiveModelKey(effective) {
   return (effective && effective.model) || (_optionsCache && _optionsCache.default_model) || '';
 }
@@ -693,7 +689,7 @@ function _videoModelEntry(key) {
 }
 
 function _effectiveVideoModelKey(effective) {
-  return (effective && effective.model) || (_optionsCache && _optionsCache.default_video_model) || 'wan22_i2v';
+  return (effective && effective.model) || (_optionsCache && _optionsCache.default_video_model) || '';
 }
 
 // A model preset's OWN loras (models.json's `[{key, weight}, ...]` form,
@@ -999,7 +995,7 @@ async function _openGalleryPicker(kind, field = 'input_image') {
   }
 }
 
-// Task item 1: the primary control, grouped by `group` ('Studio' | 'General'
+// Task item 1: the primary control, grouped by `group` ('General'
 // | 'Video' | ...) via <optgroup>, default to the resolved model key,
 // description shown underneath. An `available: false` entry (routes/
 // comfy_routes.py's resolve_model_entries() — model files not on disk /

@@ -439,11 +439,8 @@ def build_image_graph(params: dict) -> dict:
 # B. build_wan_i2v_graph
 # ---------------------------------------------------------------------------
 #
-# Verified this session directly against the ComfyUI source (not just the
-# plan's widgets_values table, and not just "Studio - Ride video (Wan2.2)
-# .json"'s subgraph, which was independently flattened by hand into a new
-# sibling file -- "Studio - Ride video FLAT (Wan2.2).json", build order step
-# 10 -- and cross-checked node-for-node against this builder's output):
+# Verified against the ComfyUI source (KSamplerAdvanced / WanImageToVideo
+# INPUT_TYPES), not a private workflow dump:
 #
 #   nodes.py:1609-1641      KSamplerAdvanced.INPUT_TYPES() -- inputs in order
 #                            model, add_noise, noise_seed, steps, cfg,

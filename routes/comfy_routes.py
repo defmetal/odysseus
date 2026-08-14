@@ -440,8 +440,7 @@ async def _resolve_input_image(input_image: str) -> tuple[str, str, str]:
 
       1. `input_image` matches GENERATED_IMAGE_RE -- an existing Odysseus
          render (e.g. picked from the Gallery as an img2img source or a
-         video start frame -- plan §3b's Tetsuya-keyframe -> Wan-video
-         chain). Read the bytes from data/generated_images/ and push them
+         video start frame). Read the bytes from data/generated_images/ and push them
          through ComfyUI's own POST /upload/image so LoadImage can resolve
          them -- this is what makes "use an existing render" work at all;
          the frontend never has to know this happens.

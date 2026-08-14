@@ -1,5 +1,5 @@
 {
-  "_comment": "Optional generic ComfyUI model presets. Discovery from the live /object_info catalog is the authority; this file only names convenient recipes. No studio LoRAs or style triggers.",
+  "_comment": "Optional generic ComfyUI model presets. Discovery from the live /object_info catalog is the authority; this file only names convenient recipes.",
   "default": "zimage_general",
   "models": {
     "zimage_general": {
