@@ -119,7 +119,21 @@ def _image_to_dict(img: GalleryImage, session_name: str = None) -> Dict[str, Any
         "file_size": img.file_size,
         "created_at": img.created_at.isoformat() if img.created_at else None,
         "updated_at": img.updated_at.isoformat() if img.updated_at else None,
+        "gen_params": _parse_gen_params(getattr(img, "gen_params", None)),
     }
+
+
+def _parse_gen_params(raw):
+    if not raw:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    try:
+        import json
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
 
 
 def _owner_filter(q, user, model_cls=GalleryImage):

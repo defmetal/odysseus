@@ -37,7 +37,7 @@ These are imported first and used across most features.
 | Module | Primary Exports | Responsibility |
 |---|---|---|
 | **`ui.js`** | `showToast`, `showError`, `el`, `copyToClipboard`, `scrollHistory`, `setAutoScroll`, `autoResize`, `debounce`, `esc` | Shared UI helpers, toast notifications, scroll behavior, element accessor, text escaping. |
-| **`storage.js`** | `default` storage wrapper | LocalStorage helpers and toggle state persistence. |
+| **`storage.js`** | `default` storage wrapper | LocalStorage helpers, toggle state, and Image/Video/Music gen defaults/session/inflight maps. |
 | **`markdown.js`** | `mdToHtml`, `processWithThinking`, `squashOutsideCode`, `normalizeThinkingMarkup`, `extractThinkingBlocks`, `hasUnclosedThinkTag`, `startsWithReasoningPrefix` | Markdown→HTML, thinking/reasoning block parsing, code-block normalization. |
 | **`spinner.js`** | `create`, `createWhirlpool` | Loading/spinner factories for streaming and tool cards. |
 | **`keyboard-shortcuts.js`** | `initKeyboardShortcuts` | Global keyboard shortcut wiring. |
@@ -56,7 +56,8 @@ The largest and most central subsystem. Chat submission → backend SSE → prog
 
 | Module | Responsibility |
 |---|---|
-| **`chat.js`** | Main chat controller. Handles `handleChatSubmit`, stops/continues, builds `FormData`, posts to `/api/chat_stream`, reads the SSE stream, and dispatches each JSON event to the appropriate renderer. Tracks background streams, stalls, auto-recovery, and multi-round agent state. |
+| **`chat.js`** | Main chat controller. Handles `handleChatSubmit`, stops/continues, builds `FormData`, posts to `/api/chat_stream`, reads the SSE stream, and dispatches each JSON event to the appropriate renderer. Tracks background streams, stalls, auto-recovery, and multi-round agent state. Image/Video/Music composer modes bypass chat and call `genParams.generate()`. |
+| **`genParams.js`** | Image / Video / Music parameter popup, progress, and generate/cancel against `/api/comfy/*` and `/api/music/*`. Hidden unless the matching backend is available. |
 | **`chatStream.js`** | Helpers shared between streaming consumers: browser notifications, background-stream completion toasts, and `ui_control` event handling. |
 | **`chatRenderer.js`** | Message DOM construction: `addMessage`, role labels, model route labels, color coding, footers, metrics, code blocks, sources boxes (`web`/`research`/`RAG`), findings box, images, report links, ask-user cards, welcome screen, and transcript utilities. |
 | **`streamingRenderer.js`** | Incremental streaming renderer used by `chat.js`. Freezes finalized DOM blocks and only re-renders the growing tail to avoid flicker and O(N²) re-parsing. |

@@ -723,6 +723,15 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                 except (TypeError, ValueError):
                     raise HTTPException(400, f"{key} must be an integer")
                 val = max(lo, min(val, hi))
+            if key == "comfy_base_url":
+                val = (val or "").strip() if isinstance(val, str) else ""
+                if val:
+                    from src.url_safety import check_outbound_url
+                    ok, reason = check_outbound_url(val)
+                    if not ok:
+                        raise HTTPException(400, f"comfy_base_url failed SSRF checks: {reason}")
+            if key == "minimax_api_key" and (val is None or val == ""):
+                continue
             current[key] = val
         _save_settings(current)
         return without_retired_settings(current)

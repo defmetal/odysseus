@@ -723,6 +723,63 @@ async function initImageSettings() {
   if (enabledToggle) enabledToggle.addEventListener('change', function() { syncImgDisabled(); saveSettings(); });
 }
 
+async function initComfyMusicSettings() {
+  const urlInput = el('set-comfyBaseUrl');
+  const keyInput = el('set-minimaxApiKey');
+  const enabledToggle = el('set-musicEnabledToggle');
+  const msg = el('set-comfyMusicMsg');
+  if (!urlInput && !keyInput && !enabledToggle) return;
+  try {
+    const settingsRes = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    const settings = await settingsRes.json();
+    if (urlInput) urlInput.value = settings.comfy_base_url || '';
+    if (enabledToggle) enabledToggle.checked = settings.music_gen_enabled !== false;
+    if (keyInput) {
+      const present = !!(settings.minimax_api_key && String(settings.minimax_api_key).trim());
+      keyInput.placeholder = present ? 'Key is set — leave blank to keep' : 'MINIMAX_API_KEY or paste here';
+    }
+  } catch (e) { console.warn('Failed to load Comfy/Music settings', e); }
+
+  async function saveComfyMusic(extra) {
+    try {
+      const body = Object.assign({
+        comfy_base_url: urlInput ? urlInput.value.trim() : undefined,
+        music_gen_enabled: enabledToggle ? !!enabledToggle.checked : undefined,
+      }, extra || {});
+      if (keyInput && keyInput.value.trim()) body.minimax_api_key = keyInput.value.trim();
+      const res = await fetch('/api/auth/settings', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(await res.text().catch(() => `HTTP ${res.status}`));
+      if (keyInput && keyInput.value.trim()) {
+        keyInput.value = '';
+        keyInput.placeholder = 'Key is set — leave blank to keep';
+      }
+      if (msg) { msg.textContent = 'Saved'; msg.style.color = 'var(--fg)'; setTimeout(() => { msg.textContent = ''; }, 2000); }
+      try {
+        const [comfy, music] = await Promise.all([
+          fetch('/api/comfy/status', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { available: false }).catch(() => ({ available: false })),
+          fetch('/api/music/status', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { available: false }).catch(() => ({ available: false })),
+        ]);
+        if (window.__odysseusSetGenAvailability) {
+          window.__odysseusSetGenAvailability({
+            image: !!comfy.available,
+            video: !!comfy.available,
+            music: !!music.available,
+          });
+        }
+      } catch (_) {}
+    } catch (e) {
+      if (msg) { msg.textContent = (e && e.message) ? e.message : 'Failed to save'; msg.style.color = 'var(--red)'; }
+    }
+  }
+  if (urlInput) urlInput.addEventListener('change', () => saveComfyMusic());
+  if (keyInput) keyInput.addEventListener('change', () => saveComfyMusic());
+  if (enabledToggle) enabledToggle.addEventListener('change', () => saveComfyMusic());
+}
+
 /* ── Vision ── */
 async function initVisionSettings() {
   const vlSel = el('set-vlModelSelect');
@@ -2248,6 +2305,7 @@ function initAll() {
   initTeacherModel();
   initUtilityModel();
   initImageSettings();
+  initComfyMusicSettings();
   initVisionSettings();
   initTtsSettings();
   initSttSettings();

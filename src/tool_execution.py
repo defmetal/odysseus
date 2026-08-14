@@ -473,6 +473,8 @@ async def _call_mcp_tool(
     # URL into its prose (which it mangles/hallucinates).
     if tool == "generate_image":
         _promote_image_fields(result)
+    if tool == "generate_music":
+        _promote_audio_fields(result)
 
     return result
 
@@ -498,6 +500,19 @@ def _promote_image_fields(result: Dict) -> None:
         fm = re.search(pat, out, re.M)
         if fm:
             result[field] = fm.group(1).strip()
+
+
+def _promote_audio_fields(result: Dict) -> None:
+    """Lift /api/generated-audio URLs from generate_music stdout into structured fields."""
+    if not isinstance(result, dict) or result.get("exit_code") != 0:
+        return
+    if result.get("audio_url"):
+        return
+    out = result.get("stdout") or result.get("output") or ""
+    m = re.search(r'(?:https?://[^\s)\]]+)?/api/generated-audio/[A-Za-z0-9._-]+', out)
+    if not m:
+        return
+    result["audio_url"] = m.group(0).strip()
 
 
 _BG_MARKERS = {"#!bg", "#bg", "# bg", "#background", "# background", "@background", "# @background"}
@@ -620,7 +635,7 @@ async def _execute_tool_block_impl(
         do_list_downloads, do_cancel_download, do_search_hf_models, do_list_cached_models,
         do_list_serve_presets, do_serve_preset, do_adopt_served_model,
         do_list_cookbook_servers,
-        do_edit_image, do_trigger_research, do_manage_research, do_resolve_contact,
+        do_edit_image, do_generate_music, do_trigger_research, do_manage_research, do_resolve_contact,
         do_manage_contact,
         do_vault_search, do_vault_get, do_vault_unlock,
         do_app_api,
@@ -859,6 +874,9 @@ async def _execute_tool_block_impl(
     elif tool == "edit_image":
         desc = "edit_image"
         result = await do_edit_image(content, owner=owner)
+    elif tool == "generate_music":
+        desc = "generate_music"
+        result = await do_generate_music(content, session_id=session_id, owner=owner)
     elif tool == "edit_file":
         result = await _direct_fallback(tool, content) or {"error": "edit failed", "exit_code": 1}
         desc = result.get("output") or result.get("error") or "edit_file"

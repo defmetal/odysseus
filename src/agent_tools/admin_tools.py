@@ -550,6 +550,8 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
             "vision model": "vision_model", "vision": "vision_enabled",
             "image model": "image_model", "image quality": "image_quality",
             "image gen": "image_gen_enabled", "image generation": "image_gen_enabled",
+            "music gen": "music_gen_enabled", "music generation": "music_gen_enabled",
+            "comfy url": "comfy_base_url", "comfy": "comfy_base_url",
             "reminder channel": "reminder_channel", "reminders": "reminder_channel",
             "ntfy topic": "reminder_ntfy_topic",
             "webhook integration": "reminder_webhook_integration_id",
@@ -716,6 +718,7 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
                 "skills": ["manage_skills"],
                 "images": ["generate_image"],
                 "image": ["generate_image"],
+                "music": ["generate_music"],
                 "tasks": ["manage_tasks"],
                 "notes": ["manage_notes"],
                 "calendar": ["manage_calendar"],
@@ -736,7 +739,7 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
                     "response": (
                         f"Currently disabled: {', '.join(current) if current else '(none)'}.\n"
                         "Common toggles: shell (bash), search (web_search), browser, documents, "
-                        "memory, skills, images, tasks, notes, calendar, email."
+                        "memory, skills, images, music, tasks, notes, calendar, email."
                     ),
                     "disabled": list(current),
                     "exit_code": 0,

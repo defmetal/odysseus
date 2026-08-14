@@ -1876,6 +1876,10 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
       const presetsModule = window.presetsModule || (await import('./presets.js')).default;
       if (presetsModule && presetsModule.onSessionSwitch) presetsModule.onSessionSwitch(id);
     } catch (e) {}
+    try {
+      const genParamsModule = window.genParamsModule || (await import('./genParams.js')).default;
+      if (genParamsModule && genParamsModule.onSessionSwitch) genParamsModule.onSessionSwitch(id);
+    } catch (e) {}
     const meta = sessions.find(s => s.id === id);
 
     // Detach any in-flight stream to background instead of aborting

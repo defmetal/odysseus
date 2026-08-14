@@ -1642,6 +1642,72 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
   return wrap;
 }
 
+const _VIDEO_URL_RE = /\.(mp4|mov|webm|mkv|m4v)(?:[?#]|$)/i;
+const _AUDIO_URL_RE = /\.(mp3|wav|flac|ogg|m4a|aac)(?:[?#]|$)|\/api\/generated-audio\//i;
+
+export function buildVideoBubble(videoUrl, prompt) {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg msg-ai generated-video-wrap';
+  wrap.dataset.imageUrl = videoUrl || '';
+  const role = document.createElement('div');
+  role.className = 'role';
+  role.textContent = 'video';
+  wrap.appendChild(role);
+  const body = document.createElement('div');
+  body.className = 'body';
+  const safeVideoUrl = safeDisplayImageSrc(videoUrl);
+  if (!safeVideoUrl) {
+    body.textContent = '[Video unavailable]';
+    wrap.appendChild(body);
+    return wrap;
+  }
+  const video = document.createElement('video');
+  video.className = 'generated-video';
+  video.src = safeVideoUrl;
+  video.controls = true;
+  video.loop = true;
+  body.appendChild(video);
+  if (prompt) {
+    const caption = document.createElement('div');
+    caption.className = 'generated-image-caption';
+    caption.textContent = prompt;
+    body.appendChild(caption);
+  }
+  wrap.appendChild(body);
+  return wrap;
+}
+
+export function buildAudioBubble(audioUrl, prompt, model) {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg msg-ai generated-audio-wrap';
+  wrap.dataset.audioUrl = audioUrl || '';
+  const role = document.createElement('div');
+  role.className = 'role';
+  role.textContent = (model || 'music').split('/').pop();
+  wrap.appendChild(role);
+  const body = document.createElement('div');
+  body.className = 'body';
+  const safeUrl = safeDisplayImageSrc(audioUrl);
+  if (!safeUrl) {
+    body.textContent = '[Audio unavailable]';
+    wrap.appendChild(body);
+    return wrap;
+  }
+  const audio = document.createElement('audio');
+  audio.className = 'generated-audio';
+  audio.src = safeUrl;
+  audio.controls = true;
+  body.appendChild(audio);
+  if (prompt) {
+    const caption = document.createElement('div');
+    caption.className = 'generated-image-caption';
+    caption.textContent = prompt;
+    body.appendChild(caption);
+  }
+  wrap.appendChild(body);
+  return wrap;
+}
+
 export function hideWelcomeScreen() {
   const ws = document.getElementById('welcome-screen');
   const cc = document.getElementById('chat-container');
@@ -2627,8 +2693,12 @@ export function addMessage(role, content, modelName, metadata) {
           lastWrap = threadWrap;
 
           for (const ev of roundTools) {
-            if (ev.image_url) {
-              box.appendChild(buildImageBubble(ev.image_url, ev.image_prompt, ev.image_model, ev.image_size, ev.image_quality, ev.image_id));
+            if (ev.audio_url || (ev.image_url && _AUDIO_URL_RE.test(ev.image_url || ev.audio_url || ''))) {
+              box.appendChild(buildAudioBubble(ev.audio_url || ev.image_url, ev.audio_prompt || ev.image_prompt, ev.audio_model || ev.image_model));
+            } else if (ev.image_url) {
+              box.appendChild(_VIDEO_URL_RE.test(ev.image_url)
+                ? buildVideoBubble(ev.image_url, ev.image_prompt)
+                : buildImageBubble(ev.image_url, ev.image_prompt, ev.image_model, ev.image_size, ev.image_quality, ev.image_id));
             }
           }
         }
@@ -3007,6 +3077,8 @@ const chatRenderer = {
   buildFindingsBox,
   appendReportButton,
   buildImageBubble,
+  buildVideoBubble,
+  buildAudioBubble,
   hideWelcomeScreen,
   showWelcomeScreen,
   createMsgFooter,

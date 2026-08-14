@@ -47,6 +47,12 @@ DEFAULT_SETTINGS = {
     "image_gen_enabled": False,
     "image_model": "",
     "image_quality": "medium",
+    # ComfyUI base URL for generic Image/Video composer modes. Empty = modes hidden.
+    "comfy_base_url": "",
+    # Music composer chip + generate_music tool. Still hidden when no backend is available.
+    "music_gen_enabled": True,
+    # Hosted MiniMax Music 3 key. Prefer MINIMAX_API_KEY env. Never commit a value.
+    "minimax_api_key": "",
     "vision_model": "",
     "vision_enabled": True,
     # Ordered fallback chain for the Vision model (image analysis, OCR, tagging).

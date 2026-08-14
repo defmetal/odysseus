@@ -1,0 +1,79 @@
+{
+  "_comment": "Optional generic ComfyUI model presets. Discovery from the live /object_info catalog is the authority; this file only names convenient recipes. No studio LoRAs or style triggers.",
+  "default": "zimage_general",
+  "models": {
+    "zimage_general": {
+      "name": "Z-Image (base)",
+      "group": "General",
+      "description": "Plain Z-Image. Uses whatever matching UNET/CLIP/VAE the connected Comfy catalog exposes.",
+      "arch": "z_image",
+      "unet": "z_image_bf16.safetensors",
+      "clip": "qwen_3_4b.safetensors",
+      "clip_type": "lumina2",
+      "vae": "ae.safetensors",
+      "loras": [],
+      "enabled": true,
+      "sizes": ["1024x1024"],
+      "defaults": {
+        "steps": 30,
+        "cfg": 4.5,
+        "sampler": "res_multistep",
+        "scheduler": "simple",
+        "shift": 3,
+        "size": "1024x1024",
+        "negative_prompt": ""
+      }
+    }
+  },
+  "default_video_model": "wan22_i2v",
+  "video_models": {
+    "wan22_i2v": {
+      "name": "Wan 2.2 (I2V)",
+      "group": "Video",
+      "description": "Image-to-video, silent. MiniMax H3 is a separate video engine, not Music 3.",
+      "engine": "wan22_i2v",
+      "unet": "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+      "unet_low": "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+      "clip": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "clip_type": "wan",
+      "vae": "wan_2.1_vae.safetensors",
+      "has_audio": false,
+      "enabled": true,
+      "sizes": ["720x720"],
+      "defaults": {
+        "steps": 4,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "shift": 5.0,
+        "fps": 16,
+        "size": "720x720",
+        "negative_prompt": ""
+      }
+    },
+    "minimax_h3": {
+      "name": "MiniMax H3 (I2V + audio)",
+      "group": "Video",
+      "description": "MiniMax H3 video with synchronized audio. Not MiniMax Music 3.",
+      "engine": "minimax_h3",
+      "unet": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "clip": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "clip_type": "minimax",
+      "vae": "minimax_h3_video_vae_fp16.safetensors",
+      "audio_vae": "minimax_h3_audio_vae_fp32.safetensors",
+      "has_audio": true,
+      "enabled": true,
+      "sizes": ["864x480", "640x640", "1344x768"],
+      "defaults": {
+        "steps": 20,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "seconds": 5.0,
+        "fps": 24,
+        "size": "864x480",
+        "shift_video": 12.0,
+        "shift_audio": 3.0
+      }
+    }
+  }
+}

@@ -11,6 +11,7 @@ import ragModule from './js/rag.js';
 import presetsModule from './js/presets.js';
 import searchModule from './js/search.js';
 import chatModule from './js/chat.js?v=20260801fix1';
+import genParamsModule from './js/genParams.js';
 import compareModule from './js/compare/index.js?v=20260723compareicon2';
 import documentModule from './js/document.js?v=20260722emailfastindex1';
 import searchChatModule from './js/search-chat.js';
@@ -59,6 +60,7 @@ window.sessionModule = sessionModule;
 window.uiModule = uiModule;
 window.adminModule = adminModule;
 window.cookbookModule = cookbookModule;
+window.genParamsModule = genParamsModule;
 
 function _isMobileChatInput() {
   return window.innerWidth <= 768;
@@ -1792,63 +1794,132 @@ function initializeEventListeners() {
   }
 
   function applyModeToToggles(mode) {
+    const isGenMode = mode === 'image' || mode === 'video' || mode === 'music';
     MODE_TOOLS.forEach(({ btnId, checkboxId, stateKey }) => {
       const btn = el(btnId);
       if (!btn) return;
-      // Hide bash button in chat mode
+      if (isGenMode) {
+        btn.style.display = 'none';
+        return;
+      }
       if (mode === 'chat' && stateKey === 'bash') {
         btn.style.display = 'none';
         return;
       }
-      // Show buttons in agent mode (or for web toggle in any mode)
       btn.style.display = '';
       if (btn.style.display === 'none') return;
       const on = loadToolPref(stateKey, mode);
       btn.classList.toggle('active', on);
       if (checkboxId) { const chk = el(checkboxId); if (chk) chk.checked = on; }
     });
+    const researchOverflowBtn = el('overflow-research-btn');
+    if (researchOverflowBtn) {
+      if (isGenMode) researchOverflowBtn.style.display = 'none';
+      else if (typeof applyUIVis === 'function' && typeof loadUIVis === 'function') applyUIVis(loadUIVis());
+    }
   }
 
-	  // ── Agent / Chat mode toggle ──
 	  (function initModeToggle() {
     const agentBtn = el('mode-agent-btn');
     const chatBtn = el('mode-chat-btn');
+    const imageBtn = el('mode-image-btn');
+    const videoBtn = el('mode-video-btn');
+    const musicBtn = el('mode-music-btn');
     if (!agentBtn || !chatBtn) return;
     const state = loadToggleState();
     let currentMode = state.mode || 'chat';
+    const availability = { image: false, video: false, music: false };
 
-    // Immediately hide bash button in chat mode on page load
-    if (currentMode === 'chat') {
+    if (currentMode !== 'agent') {
       const bashBtn = el('bash-toggle-btn');
       if (bashBtn) bashBtn.style.display = 'none';
     }
 
+    function chipVisible(mode) {
+      if (mode === 'agent' || mode === 'chat') return true;
+      return !!availability[mode];
+    }
+
+    function applyChipVisibility() {
+      if (imageBtn) {
+        imageBtn.hidden = !availability.image;
+        imageBtn.style.display = availability.image ? '' : 'none';
+      }
+      if (videoBtn) {
+        videoBtn.hidden = !availability.video;
+        videoBtn.style.display = availability.video ? '' : 'none';
+      }
+      if (musicBtn) {
+        musicBtn.hidden = !availability.music;
+        musicBtn.style.display = availability.music ? '' : 'none';
+      }
+      const toggle = agentBtn.closest('.mode-toggle');
+      if (!toggle) return;
+      const order = ['agent', 'chat', 'image', 'video', 'music'].filter(chipVisible);
+      toggle.classList.toggle('mode-toggle-gen', order.length > 2);
+      toggle.style.setProperty('--mode-count', String(order.length));
+      const idx = Math.max(0, order.indexOf(currentMode));
+      toggle.style.setProperty('--mode-index', String(idx));
+    }
+
     function setMode(mode) {
+      if (!chipVisible(mode)) mode = 'chat';
       currentMode = mode;
       const st = loadToggleState();
       st.mode = mode;
       saveToggleState(st);
       agentBtn.classList.toggle('active', mode === 'agent');
       chatBtn.classList.toggle('active', mode === 'chat');
+      if (imageBtn) imageBtn.classList.toggle('active', mode === 'image');
+      if (videoBtn) videoBtn.classList.toggle('active', mode === 'video');
+      if (musicBtn) musicBtn.classList.toggle('active', mode === 'music');
       agentBtn.setAttribute('aria-pressed', String(mode === 'agent'));
       chatBtn.setAttribute('aria-pressed', String(mode === 'chat'));
-      // Slide the pill to the active button
+      if (imageBtn) imageBtn.setAttribute('aria-pressed', String(mode === 'image'));
+      if (videoBtn) videoBtn.setAttribute('aria-pressed', String(mode === 'video'));
+      if (musicBtn) musicBtn.setAttribute('aria-pressed', String(mode === 'music'));
       const toggle = agentBtn.closest('.mode-toggle');
-      if (toggle) toggle.classList.toggle('mode-chat', mode === 'chat');
-      // Workspace pill + overflow entry are agent-only - hide immediately (no flash).
-      try { workspaceModule.applyMode(mode); } catch (_) {}
-      // Delay tool glow-up for a staggered effect
+      if (toggle) {
+        toggle.classList.toggle('mode-chat', mode === 'chat');
+        toggle.classList.toggle('mode-third', mode === 'image');
+        toggle.classList.toggle('mode-fourth', mode === 'video');
+        toggle.classList.toggle('mode-fifth', mode === 'music');
+      }
+      applyChipVisibility();
+      try { workspaceModule.applyMode(mode === 'agent' || mode === 'chat' ? mode : 'chat'); } catch (_) {}
+      try { window.genParamsModule && window.genParamsModule.onModeChange(mode); } catch (_) {}
       setTimeout(() => applyModeToToggles(mode), 500);
     }
     window.__odysseusSetChatMode = setMode;
+    window.__odysseusSetGenAvailability = (next) => {
+      Object.assign(availability, next || {});
+      applyChipVisibility();
+      if (!chipVisible(currentMode)) setMode('chat');
+    };
     agentBtn.addEventListener('click', () => {
-      // Agent mode turns off research if active
       const resChk = el('research-toggle');
       if (resChk && resChk.checked) _syncResearchIndicator(false);
       setMode('agent');
     });
     chatBtn.addEventListener('click', () => setMode('chat'));
+    if (imageBtn) imageBtn.addEventListener('click', () => setMode('image'));
+    if (videoBtn) videoBtn.addEventListener('click', () => setMode('video'));
+    if (musicBtn) musicBtn.addEventListener('click', () => setMode('music'));
 	    setMode(currentMode);
+
+    (async () => {
+      try {
+        const [comfy, music] = await Promise.all([
+          fetch('/api/comfy/status', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { available: false }).catch(() => ({ available: false })),
+          fetch('/api/music/status', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { available: false }).catch(() => ({ available: false })),
+        ]);
+        window.__odysseusSetGenAvailability({
+          image: !!comfy.available,
+          video: !!comfy.available,
+          music: !!music.available,
+        });
+      } catch (_) {}
+    })();
 	  })();
 
   (function initPlanToggle() {
@@ -3708,6 +3779,7 @@ function startOdysseusApp() {
   searchModule.init(API_BASE);
   chatModule.init(API_BASE);
   chatModule.initListeners();
+  try { genParamsModule.init(API_BASE); } catch (e) { console.error('genParams init error:', e); }
   groupModule.init(API_BASE);
   // Initialize compare module
   if (compareModule) {

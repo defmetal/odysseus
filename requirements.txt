@@ -45,6 +45,8 @@ mcp<2
 pyotp
 qrcode[pil]
 croniter
+# Async WebSocket client for src/comfy_client.py live ComfyUI progress.
+websockets
 pytest
 pytest-asyncio
 # starlette.testclient prefers httpx2 since Starlette 1.2.0 and warns on every

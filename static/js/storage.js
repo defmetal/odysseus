@@ -25,7 +25,10 @@ export const KEYS = {
   ADMIN_LAST_TAB: 'admin-last-tab',
   DENSITY: 'odysseus-density',
   UI_SCALE: 'odysseus-ui-scale',
-  WORKSPACE: 'odysseus-workspace'
+  WORKSPACE: 'odysseus-workspace',
+  GEN_DEFAULTS: 'odysseus-gen-defaults',
+  GEN_SESSIONS: 'odysseus-gen-sessions',
+  GEN_INFLIGHT: 'odysseus-gen-inflight'
 };
 
 /**
@@ -109,6 +112,30 @@ export function setToggle(name, value) {
   saveToggleState(state);
 }
 
+export function loadGenDefaults() {
+  return getJSON(KEYS.GEN_DEFAULTS, {});
+}
+
+export function saveGenDefaults(value) {
+  setJSON(KEYS.GEN_DEFAULTS, value || {});
+}
+
+export function loadGenSessions() {
+  return getJSON(KEYS.GEN_SESSIONS, {});
+}
+
+export function saveGenSessions(value) {
+  setJSON(KEYS.GEN_SESSIONS, value || {});
+}
+
+export function loadGenInflight() {
+  return getJSON(KEYS.GEN_INFLIGHT, {});
+}
+
+export function saveGenInflight(value) {
+  setJSON(KEYS.GEN_INFLIGHT, value || {});
+}
+
 const Storage = {
   KEYS,
   getJSON,
@@ -119,7 +146,13 @@ const Storage = {
   loadToggleState,
   saveToggleState,
   getToggle,
-  setToggle
+  setToggle,
+  loadGenDefaults,
+  saveGenDefaults,
+  loadGenSessions,
+  saveGenSessions,
+  loadGenInflight,
+  saveGenInflight
 };
 
 export default Storage;

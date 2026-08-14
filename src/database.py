@@ -12,6 +12,7 @@ from core.database import (  # explicit re-exports for IDE/type-checker visibili
     Document,
     DocumentVersion,
     GalleryImage,
+    GeneratedAudio,
     ModelEndpoint,
     McpServer,
     Comparison,
