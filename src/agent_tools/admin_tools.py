@@ -716,6 +716,7 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
                 "skills": ["manage_skills"],
                 "images": ["generate_image"],
                 "image": ["generate_image"],
+                "music": ["generate_music"],
                 "tasks": ["manage_tasks"],
                 "notes": ["manage_notes"],
                 "calendar": ["manage_calendar"],

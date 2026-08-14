@@ -1648,6 +1648,7 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
 // (genParams.js's _onJobDone) and the history-reconstruction path below, so
 // a video turn renders the same way live and after a reload.
 const _VIDEO_URL_RE = /\.(mp4|mov|webm|mkv|m4v)(?:[?#]|$)/i;
+const _AUDIO_URL_RE = /\.(mp3|wav|flac|ogg|m4a|aac)(?:[?#]|$)|\/api\/generated-audio\//i;
 
 /**
  * Build a generated-video bubble element (Image/Video tab video results).
@@ -1690,6 +1691,37 @@ export function buildVideoBubble(videoUrl, prompt) {
     body.appendChild(caption);
   }
 
+  wrap.appendChild(body);
+  return wrap;
+}
+
+export function buildAudioBubble(audioUrl, prompt, model) {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg msg-ai generated-audio-wrap';
+  wrap.dataset.audioUrl = audioUrl || '';
+  const role = document.createElement('div');
+  role.className = 'role';
+  role.textContent = (model || 'music').split('/').pop();
+  wrap.appendChild(role);
+  const body = document.createElement('div');
+  body.className = 'body';
+  const safeUrl = safeDisplayImageSrc(audioUrl);
+  if (!safeUrl) {
+    body.textContent = '[Audio unavailable]';
+    wrap.appendChild(body);
+    return wrap;
+  }
+  const audio = document.createElement('audio');
+  audio.className = 'generated-audio';
+  audio.src = safeUrl;
+  audio.controls = true;
+  body.appendChild(audio);
+  if (prompt) {
+    const caption = document.createElement('div');
+    caption.className = 'generated-image-caption';
+    caption.textContent = prompt;
+    body.appendChild(caption);
+  }
   wrap.appendChild(body);
   return wrap;
 }
@@ -2679,7 +2711,9 @@ export function addMessage(role, content, modelName, metadata) {
           lastWrap = threadWrap;
 
           for (const ev of roundTools) {
-            if (ev.image_url) {
+            if (ev.audio_url || (ev.image_url && _AUDIO_URL_RE.test(ev.image_url || ev.audio_url || ''))) {
+              box.appendChild(buildAudioBubble(ev.audio_url || ev.image_url, ev.audio_prompt || ev.image_prompt, ev.audio_model || ev.image_model));
+            } else if (ev.image_url) {
               // Image/Video tabs (routes/comfy_routes.py's _write_terminal_turn)
               // land BOTH kinds through the same ev.image_url field -- tell
               // them apart by extension, same as genParams.js's own live
@@ -3065,6 +3099,7 @@ const chatRenderer = {
   buildFindingsBox,
   appendReportButton,
   buildImageBubble,
+  buildAudioBubble,
   hideWelcomeScreen,
   showWelcomeScreen,
   createMsgFooter,

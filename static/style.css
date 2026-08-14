@@ -3015,6 +3015,21 @@ body.bg-pattern-sparkles {
     .mode-toggle.mode-toggle-four.mode-fourth::before {
       transform: translateX(300%);
     }
+    /* 5-way variant (Agent / Chat / Image / Video / Music). Only applied
+       when the Music chip is actually shown; Image/Video stay on the
+       4-chip layout otherwise. */
+    .mode-toggle.mode-toggle-five::before {
+      width: 20%;
+    }
+    .mode-toggle.mode-toggle-five.mode-third::before {
+      transform: translateX(200%);
+    }
+    .mode-toggle.mode-toggle-five.mode-fourth::before {
+      transform: translateX(300%);
+    }
+    .mode-toggle.mode-toggle-five.mode-fifth::before {
+      transform: translateX(400%);
+    }
     /* Structural, not ID-based — the pill's first/last child rounds to match
        the container regardless of whether it's a 2-way, 3-way or 4-way pill.
        (Previously #mode-agent-btn / #mode-chat-btn were hardcoded here, which
@@ -3079,6 +3094,15 @@ body.bg-pattern-sparkles {
       .mode-toggle.mode-toggle-four #mode-chat-btn::after { content: 'Chat'; font-size: 11px; }
       .mode-toggle.mode-toggle-four #mode-image-btn::after { content: 'Img'; font-size: 11px; }
       .mode-toggle.mode-toggle-four #mode-video-btn::after { content: 'Vid'; font-size: 11px; }
+      .mode-toggle.mode-toggle-five .mode-toggle-btn {
+        font-size: 0;
+        padding: 0 4px;
+      }
+      .mode-toggle.mode-toggle-five #mode-agent-btn::after { content: 'Agt'; font-size: 11px; }
+      .mode-toggle.mode-toggle-five #mode-chat-btn::after { content: 'Chat'; font-size: 11px; }
+      .mode-toggle.mode-toggle-five #mode-image-btn::after { content: 'Img'; font-size: 11px; }
+      .mode-toggle.mode-toggle-five #mode-video-btn::after { content: 'Vid'; font-size: 11px; }
+      .mode-toggle.mode-toggle-five #mode-music-btn::after { content: 'Mus'; font-size: 11px; }
     }
     /* Message count badge in the chat-meta header (next to the title).
        Auto-hides when empty so a brand-new chat doesn't show "0 msgs". */

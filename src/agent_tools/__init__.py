@@ -85,7 +85,7 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_fi
              "send_to_session",
              "pipeline",
              "manage_session", "manage_memory", "list_models",
-             "ui_control", "generate_image", "restyle_image", "inpaint_region", "controlnet", "ask_user", "update_plan",
+             "ui_control", "generate_image", "generate_music", "restyle_image", "inpaint_region", "controlnet", "ask_user", "update_plan",
              "manage_tasks", "api_call", "ask_teacher", "manage_skills",
              # Studio production-board MVP (Phase 5) — chat-driven PM board,
              # distinct from manage_tasks (scheduled/recurring AI jobs).

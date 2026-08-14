@@ -1794,7 +1794,7 @@ function initializeEventListeners() {
   }
 
   function applyModeToToggles(mode) {
-    const isGenMode = mode === 'image' || mode === 'video';
+    const isGenMode = mode === 'image' || mode === 'video' || mode === 'music';
     MODE_TOOLS.forEach(({ btnId, checkboxId, stateKey }) => {
       const btn = el(btnId);
       if (!btn) return;
@@ -1835,7 +1835,11 @@ function initializeEventListeners() {
     const chatBtn = el('mode-chat-btn');
     const imageBtn = el('mode-image-btn');
     const videoBtn = el('mode-video-btn');
+    const musicBtn = el('mode-music-btn');
     if (!agentBtn || !chatBtn) return;
+    // Music chip stays hidden until /api/music/status reports a backend.
+    // Image/Video studio chips stay visible (do not genericize them).
+    if (musicBtn) { musicBtn.hidden = true; musicBtn.style.display = 'none'; }
     const state = loadToggleState();
     let currentMode = state.mode || 'chat';
 
@@ -1857,10 +1861,12 @@ function initializeEventListeners() {
       chatBtn.classList.toggle('active', mode === 'chat');
       if (imageBtn) imageBtn.classList.toggle('active', mode === 'image');
       if (videoBtn) videoBtn.classList.toggle('active', mode === 'video');
+      if (musicBtn) musicBtn.classList.toggle('active', mode === 'music');
       agentBtn.setAttribute('aria-pressed', String(mode === 'agent'));
       chatBtn.setAttribute('aria-pressed', String(mode === 'chat'));
       if (imageBtn) imageBtn.setAttribute('aria-pressed', String(mode === 'image'));
       if (videoBtn) videoBtn.setAttribute('aria-pressed', String(mode === 'video'));
+      if (musicBtn) musicBtn.setAttribute('aria-pressed', String(mode === 'music'));
       // Slide the pill to the active button. `.mode-chat` is the pre-existing
       // position-2 trigger — kept as-is (not renamed) because roughly a dozen
       // call sites outside this IIFE (chat.js, chatStream.js, compare/index.js,
@@ -1874,6 +1880,7 @@ function initializeEventListeners() {
         toggle.classList.toggle('mode-chat', mode === 'chat');
         toggle.classList.toggle('mode-third', mode === 'image');
         toggle.classList.toggle('mode-fourth', mode === 'video');
+        toggle.classList.toggle('mode-fifth', mode === 'music');
       }
       // Workspace pill + overflow entry are agent-only - hide immediately (no flash).
       try { workspaceModule.applyMode(mode); } catch (_) {}
@@ -1893,7 +1900,21 @@ function initializeEventListeners() {
     chatBtn.addEventListener('click', () => setMode('chat'));
     if (imageBtn) imageBtn.addEventListener('click', () => setMode('image'));
     if (videoBtn) videoBtn.addEventListener('click', () => setMode('video'));
+    if (musicBtn) musicBtn.addEventListener('click', () => setMode('music'));
 	    setMode(currentMode);
+    (async () => {
+      try {
+        const st = await fetch('/api/music/status', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { available: false }).catch(() => ({ available: false }));
+        const on = !!(st && st.available);
+        if (musicBtn) {
+          musicBtn.hidden = !on;
+          musicBtn.style.display = on ? '' : 'none';
+        }
+        const toggle = agentBtn.closest('.mode-toggle');
+        if (toggle) toggle.classList.toggle('mode-toggle-five', on);
+        if (!on && currentMode === 'music') setMode('chat');
+      } catch (_) {}
+    })();
 	  })();
 
   (function initPlanToggle() {

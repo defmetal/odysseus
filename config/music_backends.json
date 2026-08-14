@@ -1,0 +1,24 @@
+{
+  "_comment": "Pluggable music-generation backends. Keys are engine ids. Secrets are never stored here — MiniMax API keys come from MINIMAX_API_KEY or Settings.",
+  "default": "minimax_music3_comfy",
+  "backends": {
+    "minimax_music3_comfy": {
+      "name": "MiniMax Music 3 (local ComfyUI)",
+      "engine": "minimax_music3_comfy",
+      "description": "Run MiniMax Music 3 weights on your own ComfyUI. No API key. Requires comfy_base_url and the Music 3 DiT / text-encoder / DAV files.",
+      "needs_comfy": true,
+      "needs_api_key": false,
+      "enabled": true
+    },
+    "minimax_music3_api": {
+      "name": "MiniMax Music 3 (hosted API)",
+      "engine": "minimax_music3_api",
+      "description": "Hosted MiniMax Music 3. Set MINIMAX_API_KEY or Settings → minimax_api_key. This is Music 3, not MiniMax H3 video.",
+      "needs_comfy": false,
+      "needs_api_key": true,
+      "api_url": "https://api.minimax.io/v1/music_generation",
+      "model": "music-3.0",
+      "enabled": true
+    }
+  }
+}

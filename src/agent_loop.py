@@ -490,6 +490,10 @@ _DOMAIN_RULES = {
 - To fix face drift on an UPLOADED image (the face looks off-model/wrong in a wider shot), use `fix_faces` instead of a generic `inpaint_region` call — it's tuned specifically for a close-up face redraw (optional character-trigger line + optional expression/detail hint line, both may be omitted).
 - For a one-off dataset-factory edit of an UPLOADED image (colorize line art against a character's color reference, vary the pose/scene, or build a multi-view character turnaround sheet), use `reference_edit` (mode line: colorize/vary/turnaround, then an optional prompt line and an optional `ref: <character>` line). This runs a SEPARATE, heavier model (Qwen-Image-Edit-2511) from the Z-Image house style — never add a style trigger for it. It handles ONE uploaded image per call; batch runs are CLI-only, do not promise bulk processing.
 - For gallery-image edits (upscale, remove background), use `edit_image`.""",
+    "music": """\
+## Music generation rules
+- `generate_music` writes a song via `/api/music` (MiniMax Music 3 local Comfy or hosted API). It is not MiniMax H3 video and must not be sent to `/api/comfy` as a kind.
+- Image/Video composer tabs talk to `/api/comfy/*`. Music uses `/api/music/*` only.""",
     "web": """\
 ## Web rules
 - For web lookup/search/latest/current requests, use `web_search` or `web_fetch`.
@@ -558,6 +562,7 @@ _DOMAIN_RULES = {
 _DOMAIN_TOOL_MAP = {
     "images": {"generate_image", "edit_image", "restyle_image", "inpaint_region", "controlnet",
                "fix_faces", "reference_edit"},
+    "music": {"generate_music"},
     "web": set(WEB_TOOL_NAMES),
     "documents": {"create_document", "edit_document", "update_document", "suggest_document", "manage_documents"},
     "email": {"list_email_accounts", "list_emails", "read_email", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact"},
@@ -717,6 +722,15 @@ Suggest changes with explanations (for review/feedback requests).""",
 <quality>
 ```
 Generate an image. Line 1 = description, line 2 = model name (LEAVE EMPTY to use the configured image model — never guess or invent model names), line 3 = WxH (e.g. 1024x1024), line 4 = quality.""",
+
+    "generate_music": """\
+```generate_music
+<caption>
+<lyrics>
+<backend>
+<seconds>
+```
+Generate a song with MiniMax Music 3 (local Comfy or hosted API). Line 1 = music caption (style/mood/arrangement), line 2 = optional lyrics with [Verse]/[Chorus] tags, line 3 = backend key (`minimax_music3_comfy` or `minimax_music3_api`), line 4 = duration in seconds. JSON `{"prompt","lyrics","backend","seconds"}` also works. This is Music 3, not MiniMax H3 video.""",
 
     "restyle_image": """\
 ```restyle_image
@@ -3001,6 +3015,15 @@ def _build_base_prompt(
     disabled = set(disabled_tools or [])
     if not get_setting("image_gen_enabled", False):
         disabled.add("generate_image")
+    if not get_setting("music_gen_enabled", True):
+        disabled.add("generate_music")
+    else:
+        try:
+            from src.music_backends import default_backend_key
+            if not default_backend_key():
+                disabled.add("generate_music")
+        except Exception:
+            disabled.add("generate_music")
 
     if relevant_tools is not None:
         # RAG mode: trust the relevant_tools set as already-composed.
@@ -5864,7 +5887,8 @@ async def stream_agent_loop(
                         tool_output_data[k] = result[k]
             # Forward image data from image tools so the frontend can render it
             # immediately instead of waiting for a history reload.
-            for k in ("image_url", "image_id", "image_prompt", "image_model", "image_size", "image_quality"):
+            for k in ("image_url", "image_id", "image_prompt", "image_model", "image_size", "image_quality",
+                      "audio_url", "audio_id", "audio_prompt", "audio_model"):
                 if k in result:
                     tool_output_data[k] = result[k]
             # Forward screenshots from browser tools (base64 images)

@@ -388,6 +388,22 @@ class GalleryImage(TimestampMixin, Base):
     )
 
 
+class GeneratedAudio(TimestampMixin, Base):
+    """Metadata for songs landed by /api/music/* (MiniMax Music 3, etc.)."""
+    __tablename__ = "generated_audio"
+
+    id         = Column(String, primary_key=True, index=True)
+    filename   = Column(String, nullable=False, unique=True)
+    prompt     = Column(Text, nullable=False, default="")
+    lyrics     = Column(Text, nullable=True, default="")
+    model      = Column(String, nullable=True)
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="SET NULL"), nullable=True, index=True)
+    owner      = Column(String, nullable=True, index=True)
+    gen_params = Column(Text, nullable=True)
+    file_size  = Column(Integer, nullable=True)
+    is_active  = Column(Boolean, default=True)
+
+
 class EmailAccount(TimestampMixin, Base):
     """A configured IMAP/SMTP account. Supports multiple accounts per user —
     exactly one row per owner has is_default=True.

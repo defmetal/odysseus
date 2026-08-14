@@ -31,6 +31,7 @@ from src.tools.image import (  # noqa: F401
     do_restyle_image, do_inpaint_region, do_controlnet,  # studio image-edit tools
     do_fix_faces, do_reference_edit,  # face-drift fix + QIE dataset-factory chat access
 )
+from src.tools.music import do_generate_music  # noqa: F401
 from src.tools.research import do_manage_research, do_trigger_research  # noqa: F401
 from src.tools.contacts import do_resolve_contact, do_manage_contact  # noqa: F401
 from src.tools.vault import (  # noqa: F401

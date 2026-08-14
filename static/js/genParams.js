@@ -110,7 +110,20 @@ const VIDEO_BASELINE = Object.freeze({
 const SIZE_PRESETS_IMAGE = ['1216x672', '1152x864', '1024x1024', 'custom'];
 const SIZE_PRESETS_VIDEO = ['720x720', 'custom'];
 
-function _baseline(kind) { return kind === 'video' ? VIDEO_BASELINE : IMAGE_BASELINE; }
+const MUSIC_BASELINE = Object.freeze({
+  backend: '',
+  lyrics: '',
+  seconds: 60,
+  seed: 0,
+  randomize_seed: true,
+  instrumental: false,
+});
+
+function _baseline(kind) {
+  if (kind === 'video') return VIDEO_BASELINE;
+  if (kind === 'music') return MUSIC_BASELINE;
+  return IMAGE_BASELINE;
+}
 
 // ── Persistence ──
 // Editing scope: which layer field edits in the currently-open popup write
@@ -269,6 +282,8 @@ let _optionsCache = null;
 let _optionsFetchedAt = 0;
 let _workflowsCache = null;
 let _workflowsFetchedAt = 0;
+let _musicBackendsCache = null;
+let _musicBackendsFetchedAt = 0;
 const _CACHE_MS = 60000;
 
 async function _fetchOptions(force) {
@@ -297,6 +312,20 @@ async function _fetchWorkflows(force) {
   }
   _workflowsFetchedAt = Date.now();
   return _workflowsCache;
+}
+
+async function _fetchMusicBackends(force) {
+  if (!force && _musicBackendsCache && Date.now() - _musicBackendsFetchedAt < _CACHE_MS) return _musicBackendsCache;
+  try {
+    const res = await fetch(`${API_BASE}/api/music/backends`, { credentials: 'same-origin' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    _musicBackendsCache = await res.json();
+  } catch (e) {
+    console.warn('[genParams] /api/music/backends unavailable:', e.message || e);
+    _musicBackendsCache = { backends: [], default: null };
+  }
+  _musicBackendsFetchedAt = Date.now();
+  return _musicBackendsCache;
 }
 
 async function _applyWorkflow(kind, name) {
@@ -557,7 +586,7 @@ export function init(apiBase) {
 
 export function onModeChange(mode) {
   if (!_wrap) return; // DOM not wired (index.html markup missing) — no-op
-  const isGen = mode === 'image' || mode === 'video';
+  const isGen = mode === 'image' || mode === 'video' || mode === 'music';
   _wrap.style.display = isGen ? '' : 'none';
   if (isGen) {
     if (_currentKind !== mode) {
@@ -568,8 +597,11 @@ export function onModeChange(mode) {
       }
       if (!_menu.classList.contains('hidden')) _renderPanel();
     }
-    _fetchOptions().catch(() => {});
-    _fetchWorkflows().catch(() => {});
+    if (mode === 'music') _fetchMusicBackends().catch(() => {});
+    else {
+      _fetchOptions().catch(() => {});
+      _fetchWorkflows().catch(() => {});
+    }
   } else {
     _close();
   }
@@ -1203,11 +1235,49 @@ function _renderPanel() {
         <button type="button" class="gen-params-tab${_editScope === 'default' ? ' active' : ''}" data-action="set-scope" data-scope-value="default">Global default</button>
       </div>
     </div>`;
-  const body = _currentKind === 'video' ? _renderVideoPanel(effective, advanced) : _renderImagePanel(effective, advanced);
+  let body;
+  if (_currentKind === 'music') body = _renderMusicPanel(effective, advanced);
+  else if (_currentKind === 'video') body = _renderVideoPanel(effective, advanced);
+  else body = _renderImagePanel(effective, advanced);
   _bodyEl.innerHTML = scopeRow + body;
 }
 
 // ── Delegated event handlers for the rendered body ──
+
+function _renderMusicPanel(effective, advanced) {
+  const backends = (_musicBackendsCache && _musicBackendsCache.backends) || [];
+  const available = backends.filter(b => b.available);
+  const current = effective.backend || (_musicBackendsCache && _musicBackendsCache.default) || '';
+  const opts = available.map(b =>
+    `<option value="${esc(b.key)}"${b.key === current ? ' selected' : ''}>${esc(b.name || b.key)}</option>`
+  ).join('');
+  const chosen = available.find(b => b.key === current) || available[0];
+  return `
+    <div class="gen-params-section-title">Backend</div>
+    <div class="gen-params-row settings-row">
+      <label class="settings-label">Engine</label>
+      <select class="settings-select" data-field="backend">${opts || '<option value="">(none available)</option>'}</select>
+    </div>
+    <div class="gen-params-hint">${esc((chosen && chosen.description) || 'MiniMax Music 3 — local Comfy weights or hosted API. Not MiniMax H3 video.')}</div>
+    <div class="gen-params-section-title">Song</div>
+    <div class="gen-params-hint">The send bar is the caption (style / mood / arrangement). Optional lyrics with section tags like [Verse] and [Chorus].</div>
+    <textarea class="settings-textarea" data-field="lyrics" rows="5" placeholder="[Verse]&#10;optional lyrics">${esc(effective.lyrics || '')}</textarea>
+    <div class="gen-params-row settings-row">
+      <label class="settings-label">Seconds</label>
+      <input type="number" class="settings-input" data-field="seconds" min="5" max="300" step="1" value="${_escNum(effective.seconds || 60)}">
+    </div>
+    <div class="gen-params-row settings-row">
+      <label style="display:flex;align-items:center;gap:6px;font-size:11px;"><input type="checkbox" data-field="instrumental" ${effective.instrumental ? 'checked' : ''}> Instrumental (no vocals)</label>
+    </div>
+    ${advanced ? `<div class="gen-params-row settings-row">
+      <label class="settings-label">Seed</label>
+      <input type="number" class="settings-input" data-field="seed" value="${_escNum(effective.seed || 0)}">
+    </div>
+    <div class="gen-params-row settings-row">
+      <label style="display:flex;align-items:center;gap:6px;font-size:11px;"><input type="checkbox" data-field="randomize_seed" ${effective.randomize_seed ? 'checked' : ''}> Randomize seed</label>
+    </div>` : ''}
+    ${_heartbeatRowHtml()}`;
+}
 
 function _onBodyClick(e) {
   const scopeBtn = e.target.closest('[data-action="set-scope"]');
@@ -1449,6 +1519,19 @@ function _resolvedInputImageName(img) {
 function _buildParamsPayload(kind, effective, promptText) {
   const seed = effective.randomize_seed ? Math.floor(Math.random() * 2147483647) : Number(effective.seed) || 0;
 
+  if (kind === 'music') {
+    return {
+      prompt: promptText,
+      caption: promptText,
+      lyrics: effective.lyrics || '',
+      seconds: Number(effective.seconds) || 60,
+      backend: effective.backend || '',
+      instrumental: !!effective.instrumental,
+      seed,
+      randomize_seed: !!effective.randomize_seed,
+    };
+  }
+
   if (kind === 'video') {
     // Video: model-preset-aware (task item 4), mirroring the image
     // branch below field-for-field: only TOUCHED fields (_touchedSet()) are
@@ -1608,7 +1691,7 @@ function _mountProgressBubble(kind) {
   const holder = document.createElement('div');
   holder.className = 'msg msg-ai gen-progress-msg';
   const roleTs = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  holder.innerHTML = `<div class="role">${kind === 'video' ? 'Video' : 'Image'} <span class="role-timestamp">${esc(roleTs)}</span></div>
+  holder.innerHTML = `<div class="role">${kind === 'music' ? 'Music' : (kind === 'video' ? 'Video' : 'Image')} <span class="role-timestamp">${esc(roleTs)}</span></div>
     <div class="body">
       <div class="gen-progress">
         <div class="gen-progress-row">
@@ -1662,7 +1745,8 @@ function _finishJob(job) {
 async function _cancelJob(job) {
   _updateProgressDom(job.holder, { label: 'Cancelling…' });
   try {
-    await fetch(`${API_BASE}/api/comfy/cancel/${encodeURIComponent(job.jobId)}`, { method: 'POST', credentials: 'same-origin' });
+    const cancelBase = job.kind === 'music' ? '/api/music/cancel' : '/api/comfy/cancel';
+    await fetch(`${API_BASE}${cancelBase}/${encodeURIComponent(job.jobId)}`, { method: 'POST', credentials: 'same-origin' });
   } catch (_) {}
   if (job.holder && document.body.contains(job.holder)) {
     const row = job.holder.querySelector('.gen-progress-row');
@@ -1686,6 +1770,7 @@ function _onJobError(job, message) {
 
 function _onJobDone(job, data) {
   const images = (data && data.images) || [];
+  const audio = (data && data.audio) || [];
   if (job.holder && document.body.contains(job.holder)) job.holder.remove();
   // Only paint result bubbles into #chat-history when job.sessionId is the
   // session actually on screen right now — a job that finishes while the
@@ -1696,6 +1781,11 @@ function _onJobDone(job, data) {
   // correct) regardless of this check — gallery-refresh always fires below.
   if (_isCurrentSession(job.sessionId)) {
     const box = document.getElementById('chat-history');
+    audio.forEach(item => {
+      if (!item || !item.url) return;
+      const bubble = chatRenderer.buildAudioBubble(item.url, job.prompt, job.params && job.params.backend);
+      if (box) box.appendChild(bubble);
+    });
     images.forEach(img => {
       if (!img || !img.url) return;
       const isVideo = /\.(mp4|mov|webm|mkv|m4v)$/i.test(img.filename || img.url);
@@ -1713,9 +1803,10 @@ function _onJobDone(job, data) {
     // Never fail silently: say where the result went. (This is now the
     // genuine cross-session case only -- the stale-cache false negative that
     // used to land here is fixed in _isCurrentSession().)
-    const n = images.length;
+    const n = images.length + audio.length;
+    const label = job.kind === 'music' ? 'Music' : (job.kind === 'video' ? 'Video' : 'Image');
     showToast(n
-      ? `${job.kind === 'video' ? 'Video' : 'Image'} finished in another chat - saved to the Gallery.`
+      ? `${label} finished in another chat - saved to the Gallery.`
       : 'Generation finished - saved to the Gallery.');
   }
   window.dispatchEvent(new CustomEvent('gallery-refresh', { detail: { source: 'genParams' } }));
@@ -1729,7 +1820,8 @@ function _connectStream(job) {
   if (job.tickTimer) clearInterval(job.tickTimer);
   if (job.heartbeatTimer) clearInterval(job.heartbeatTimer);
 
-  const es = new EventSource(`${API_BASE}/api/comfy/stream/${encodeURIComponent(job.jobId)}`);
+  const streamBase = job.kind === 'music' ? '/api/music/stream' : '/api/comfy/stream';
+  const es = new EventSource(`${API_BASE}${streamBase}/${encodeURIComponent(job.jobId)}`);
   job.es = es;
 
   job.tickTimer = setInterval(() => {
@@ -1792,7 +1884,8 @@ export async function generate(kind, promptText, sessionId) {
   if (_activeJobs.has(sid)) { showToast('A generation is already running in this chat.'); return; }
   if (!promptText || !promptText.trim()) { showToast('Type a prompt first.'); return; }
 
-  await Promise.all([_fetchOptions(), _fetchWorkflows()]);
+  if (kind === 'music') await _fetchMusicBackends();
+  else await Promise.all([_fetchOptions(), _fetchWorkflows()]);
   const effective = _effective(kind, sid);
   const params = _buildParamsPayload(kind, effective, promptText.trim());
 
@@ -1815,11 +1908,16 @@ export async function generate(kind, promptText, sessionId) {
   }
 
   try {
-    const res = await fetch(`${API_BASE}/api/comfy/generate`, {
+    const isMusic = kind === 'music';
+    const url = isMusic ? `${API_BASE}/api/music/generate` : `${API_BASE}/api/comfy/generate`;
+    const body = isMusic
+      ? { session_id: sid, params: { ...params, prompt: promptText.trim() } }
+      : { kind, workflow: effective.workflow || 'Custom', session_id: sid, params };
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
-      body: JSON.stringify({ kind, workflow: effective.workflow || 'Custom', session_id: sid, params }),
+      body: JSON.stringify(body),
     });
     const data = await res.json();
     if (!res.ok || !data || !data.job_id) {

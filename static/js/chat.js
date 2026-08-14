@@ -1424,7 +1424,7 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
     // image-generation path on model name alone (z-image/flux/sdxl/etc.), so
     // Image/Video mode must never reach /api/chat_stream at all.
     const _genMode = Storage.loadToggleState().mode;
-    if (_genMode === 'image' || _genMode === 'video') {
+    if (_genMode === 'image' || _genMode === 'video' || _genMode === 'music') {
       el('message').value = '';
       if (window._syncModelPickerAutohide) window._syncModelPickerAutohide();
       if (uiModule.autoResize) uiModule.autoResize(el('message'));

@@ -63,6 +63,12 @@ DEFAULT_SETTINGS = {
     # hardcoded constant, because odysseus-comfyui runs outside
     # docker-compose (plain `docker run`, no fixed address guarantee).
     "comfy_base_url": "http://host.docker.internal:8188",
+    # Music composer chip + generate_music tool. Still hidden when no backend is available.
+    "music_gen_enabled": True,
+    # Preferred music backend key from config/music_backends.json (empty = registry default).
+    "music_backend": "",
+    # Hosted MiniMax Music 3 key. Prefer MINIMAX_API_KEY env. Never commit a value.
+    "minimax_api_key": "",
     "tts_enabled": True,
     "tts_provider": "disabled",
     "tts_model": "tts-1",
