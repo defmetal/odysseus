@@ -78,6 +78,7 @@ import bcrypt as _bcrypt
 
 from src.app_helpers import abs_join, serve_html_with_nonce
 from src.generated_images import GENERATED_IMAGE_HEADERS, resolve_generated_image_path
+from src.generated_audio import GENERATED_AUDIO_HEADERS, resolve_generated_audio_path
 from starlette.responses import RedirectResponse
 
 # ========= LOGGING =========
@@ -538,6 +539,38 @@ async def serve_generated_image(filename: str, request: Request):
         headers=GENERATED_IMAGE_HEADERS,
     )
 
+
+@app.get("/api/generated-audio/{filename}")
+async def serve_generated_audio(filename: str, request: Request):
+    """Serve generated music from the data directory."""
+    audio_path = resolve_generated_audio_path(filename)
+    try:
+        from src.auth_helpers import get_current_user
+        from core.database import SessionLocal as _SL, GeneratedAudio as _GA
+        _user = get_current_user(request)
+        if _user:
+            _db = _SL()
+            try:
+                _row = _db.query(_GA).filter(_GA.filename == filename).first()
+                if _row is not None and _row.owner and _row.owner != _user:
+                    raise HTTPException(status_code=404, detail="Audio not found")
+            finally:
+                _db.close()
+    except HTTPException:
+        raise
+    except Exception as _e:
+        logger.warning("Audio ownership verification failed for %r", filename, exc_info=_e)
+    ext = filename.rsplit('.', 1)[-1].lower()
+    mime = {
+        "mp3": "audio/mpeg", "wav": "audio/wav", "flac": "audio/flac",
+        "ogg": "audio/ogg", "m4a": "audio/mp4", "aac": "audio/aac",
+    }.get(ext, "application/octet-stream")
+    return FileResponse(
+        str(audio_path),
+        media_type=mime,
+        headers=GENERATED_AUDIO_HEADERS,
+    )
+
 # ========= YOUTUBE INIT =========
 from services.youtube import init_youtube
 init_youtube()
@@ -750,6 +783,12 @@ app.include_router(setup_signature_routes())
 # Gallery (image library)
 from routes.gallery.gallery_routes import setup_gallery_routes
 app.include_router(setup_gallery_routes())
+
+from routes.comfy_routes import setup_comfy_routes
+app.include_router(setup_comfy_routes())
+
+from routes.music_routes import setup_music_routes
+app.include_router(setup_music_routes())
 
 # Persisted image-editor drafts (server-backed projects)
 from routes.editor_draft_routes import setup_editor_draft_routes

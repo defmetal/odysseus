@@ -157,7 +157,7 @@ _PLAN_MODE_KNOWN_MUTATORS = {
     "download_attachment",
     "download_model", "serve_model",
     "stop_served_model", "cancel_download", "adopt_served_model", "serve_preset",
-    "generate_image", "edit_image", "trigger_research", "manage_research",
+    "generate_image", "generate_music", "edit_image", "trigger_research", "manage_research",
     # Shell is never read-only-safe; block it explicitly so it stays out of plan
     # mode even if the schema list fails to load.
     "bash", "python",

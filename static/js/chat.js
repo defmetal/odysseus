@@ -23,6 +23,7 @@ import slashCommands, { initSlashCommands, isCommand, handleSlashCommand, handle
 import createResearchSynapse from './researchSynapse.js';
 import { createStreamRenderer } from './streamingRenderer.js';
 import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArrowUpRecall.js?v=20260714promptrecall';
+import genParamsModule from './genParams.js';
 import {
   createIncrementalDisplayProjector,
   createLiveThinkingThrottle,
@@ -1322,6 +1323,20 @@ import {
         _releaseSendFlag();
         return;
       }
+    }
+
+    const _genMode = Storage.loadToggleState().mode;
+    if (_genMode === 'image' || _genMode === 'video' || _genMode === 'music') {
+      el('message').value = '';
+      if (window._syncModelPickerAutohide) window._syncModelPickerAutohide();
+      if (uiModule.autoResize) uiModule.autoResize(el('message'));
+      const _genSessionId = sessionModule.getCurrentSessionId();
+      genParamsModule.generate(_genMode, msg.trim(), _genSessionId).catch(err => {
+        console.error('[genParams] generate failed:', err);
+        uiModule.showToast('Generation failed to start: ' + (err && err.message || 'error'));
+      });
+      _releaseSendFlag();
+      return;
     }
 
     // --- API key guard: warn if message looks like an API key ---
@@ -2644,7 +2659,7 @@ import {
                 typewriterInto(roundHolder.querySelector('.body'), errMsg);
                 break;
               }
-              if (json.delta || json.type === 'agent_prep' || json.type === 'generated_image' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'loop_breaker_triggered' || json.type === 'intent_nudge_exhausted' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress') {
+              if (json.delta || json.type === 'agent_prep' || json.type === 'generated_image' || json.type === 'generated_audio' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'loop_breaker_triggered' || json.type === 'intent_nudge_exhausted' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress') {
                 clearResponseTimeout();
                 clearProcessingProbe();
                 clearFirstTokenWaitTimers();
@@ -2652,6 +2667,13 @@ import {
               if (json.type === 'generated_image') {
                 _rememberGeneratedImage(json);
                 if (!_isBg) _appendGeneratedImageBubble(json);
+                continue;
+              }
+              if (json.type === 'generated_audio') {
+                if (!_isBg && chatRenderer.buildAudioBubble) {
+                  const box = document.getElementById('chat-history');
+                  if (box) box.appendChild(chatRenderer.buildAudioBubble(json.audio_url || json.url, json.audio_prompt, json.audio_model));
+                }
                 continue;
               }
               if (json.type === 'agent_prep') {

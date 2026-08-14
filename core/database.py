@@ -354,6 +354,7 @@ class GalleryImage(TimestampMixin, Base):
     quality    = Column(String, nullable=True)
     tags       = Column(String, nullable=True, default="")
     ai_tags    = Column(Text, nullable=True, default="")       # AI-generated tags (comma-separated)
+    gen_params = Column(Text, nullable=True)  # JSON: resolved Image/Video generation params for re-roll
     session_id = Column(String, ForeignKey("sessions.id", ondelete="SET NULL"), nullable=True, index=True)
     album_id   = Column(String, ForeignKey("gallery_albums.id", ondelete="SET NULL"), nullable=True, index=True)
     owner      = Column(String, nullable=True, index=True)
@@ -381,6 +382,22 @@ class GalleryImage(TimestampMixin, Base):
         Index('ix_gallery_images_model', 'model'),
         Index('ix_gallery_images_active', 'is_active', 'created_at'),
     )
+
+
+class GeneratedAudio(TimestampMixin, Base):
+    """Metadata for songs landed by /api/music/* (MiniMax Music 3, etc.)."""
+    __tablename__ = "generated_audio"
+
+    id         = Column(String, primary_key=True, index=True)
+    filename   = Column(String, nullable=False, unique=True)
+    prompt     = Column(Text, nullable=False, default="")
+    lyrics     = Column(Text, nullable=True, default="")
+    model      = Column(String, nullable=True)
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="SET NULL"), nullable=True, index=True)
+    owner      = Column(String, nullable=True, index=True)
+    gen_params = Column(Text, nullable=True)
+    file_size  = Column(Integer, nullable=True)
+    is_active  = Column(Boolean, default=True)
 
 
 class EmailAccount(TimestampMixin, Base):
@@ -1365,6 +1382,29 @@ def _migrate_add_gallery_caption_column():
             pass
 
 
+def _migrate_add_gallery_gen_params_column():
+    """Add gen_params JSON storage for ComfyUI Image/Video gallery re-rolls."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(gallery_images)").fetchall()]
+        if columns and "gen_params" not in columns:
+            conn.execute("ALTER TABLE gallery_images ADD COLUMN gen_params TEXT")
+            conn.commit()
+            logging.getLogger(__name__).info("Migrated: added gen_params column to gallery_images")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Migration gallery gen_params column failed: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def _migrate_add_api_token_scopes_column():
     """Add API token scopes for existing installs.
 
@@ -2101,6 +2141,7 @@ def init_db():
     _migrate_add_mode_column()
     _migrate_add_multiuser_owner_columns()
     _migrate_add_gallery_caption_column()
+    _migrate_add_gallery_gen_params_column()
     _migrate_add_api_token_scopes_column()
     _migrate_backfill_document_owner_from_session()
     _migrate_assign_legacy_owner()

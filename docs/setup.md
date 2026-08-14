@@ -508,6 +508,13 @@ Common internal-only ports from the default docs/compose setup:
 | `11434` | Ollama |
 | `8000-8020` | Common local model/provider APIs |
 
+## Image / Video / Music
+
+Optional composer chips (Image, Video, Music) stay hidden until a backend is
+available. Connect your own ComfyUI and/or set `MINIMAX_API_KEY`. Studio
+LoRAs and style packs are out of scope. See
+[Image, Video, and Music generation](media-generation.md).
+
 ## Configuration
 Most setup is done inside the app with `/setup` or **Settings**. Use `.env`
 for deployment-level defaults and secrets you want present before first boot.
@@ -518,6 +525,7 @@ Key settings:
 | `LLM_HOST` | `localhost` | Your LLM server (e.g. `llm-host.local:8000`) |
 | `LLM_HOSTS` | -- | Comma-separated list for model discovery |
 | `OPENAI_API_KEY` | -- | Optional OpenAI key. Prefer adding providers in the app unless pre-seeding. |
+| `MINIMAX_API_KEY` | -- | Optional hosted MiniMax Music 3 key. Prefer Settings if you only need the Music chip. |
 | `SEARXNG_INSTANCE` | `http://localhost:8080` | SearXNG URL. Docker overrides this to `http://searxng:8080`. |
 | `SEARXNG_SECRET` | generated on first Docker boot | Optional SearXNG cookie/CSRF secret. Leave blank unless you need to pin it. |
 | `APP_BIND` | `127.0.0.1` | Docker Compose host bind address for the web UI. Use `0.0.0.0` only for intentional LAN/reverse-proxy access. |

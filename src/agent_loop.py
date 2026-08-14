@@ -495,6 +495,11 @@ _DOMAIN_RULES = {
 ## Integration/API rules
 - To query or control a configured service integration (Home Assistant, Miniflux, Gitea, Linkding, Jellyfin, or any other registered service), use `api_call` with the integration name, HTTP method, path, and optional JSON body.
 - Do not use shell, curl, or `app_api` to reach a user's connected integration when `api_call` is available.""",
+    "media": """\
+## Media generation rules
+- `generate_image` is the existing API-model image path, not the ComfyUI Image tab.
+- `generate_music` writes a song via `/api/music` (MiniMax Music 3 local Comfy or hosted API). It is not MiniMax H3 video and must not be sent to `/api/comfy` as a kind.
+- Image/Video composer tabs talk to `/api/comfy/*` only when `comfy_base_url` is set and Comfy is reachable.""",
 }
 
 _DOMAIN_TOOL_MAP = {
@@ -509,6 +514,7 @@ _DOMAIN_TOOL_MAP = {
     "settings": {"manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens", "app_api"},
     "contacts": {"resolve_contact", "manage_contact"},
     "integrations": {"api_call"},
+    "media": {"generate_image", "generate_music", "edit_image"},
 }
 
 _WORKSPACE_TERMINUS_TOOLS = (
@@ -656,6 +662,15 @@ Suggest changes with explanations (for review/feedback requests).""",
 <quality>
 ```
 Generate an image. Line 1 = description, line 2 = model name, line 3 = WxH (e.g. 1024x1024), line 4 = quality.""",
+
+    "generate_music": """\
+```generate_music
+<caption>
+<lyrics>
+<backend>
+<seconds>
+```
+Generate a song with MiniMax Music 3 (local Comfy or hosted API). Line 1 = music caption (style/mood/arrangement), line 2 = optional lyrics with [Verse]/[Chorus] tags, line 3 = backend key (`minimax_music3_comfy` or `minimax_music3_api`), line 4 = duration in seconds. JSON `{"prompt","lyrics","backend","seconds"}` also works. This is Music 3, not MiniMax H3 video.""",
 
     "chat_with_model": "- ```chat_with_model``` — Ask a DIFFERENT AI model and relay its answer. Line 1 = model name (or 'model@endpoint'), rest = your message. Use when the user says 'ask <model>', 'what does <model> think', or wants to compare/their answer from another model.",
     "ask_teacher": "- ```ask_teacher``` — Escalate a hard question to a more capable model. Line 1 = model name or 'auto', rest = the question. Use when stuck or need expert knowledge.",
@@ -2625,6 +2640,15 @@ def _build_base_prompt(
     disabled = set(disabled_tools or [])
     if not get_setting("image_gen_enabled", False):
         disabled.add("generate_image")
+    if not get_setting("music_gen_enabled", True):
+        disabled.add("generate_music")
+    else:
+        try:
+            from src.music_backends import default_backend_key
+            if not default_backend_key():
+                disabled.add("generate_music")
+        except Exception:
+            disabled.add("generate_music")
 
     if relevant_tools is not None:
         # RAG mode: trust the relevant_tools set as already-composed.
@@ -4879,7 +4903,8 @@ async def stream_agent_loop(
                         tool_output_data[k] = result[k]
             # Forward image data from image tools so the frontend can render it
             # immediately instead of waiting for a history reload.
-            for k in ("image_url", "image_id", "image_prompt", "image_model", "image_size", "image_quality"):
+            for k in ("image_url", "image_id", "image_prompt", "image_model", "image_size", "image_quality",
+                      "audio_url", "audio_id", "audio_prompt", "audio_model"):
                 if k in result:
                     tool_output_data[k] = result[k]
             # Forward screenshots from browser tools (base64 images)
@@ -4896,6 +4921,12 @@ async def stream_agent_loop(
                     if k in result:
                         generated_image_data[k] = result[k]
                 yield f'data: {json.dumps(generated_image_data)}\n\n'
+            if result.get("audio_url"):
+                generated_audio_data = {"type": "generated_audio", "url": result.get("audio_url")}
+                for k in ("audio_url", "audio_id", "audio_prompt", "audio_model"):
+                    if k in result:
+                        generated_audio_data[k] = result[k]
+                yield f'data: {json.dumps(generated_audio_data)}\n\n'
 
             if block.tool_type == "manage_notes":
                 _notes_action = ""
