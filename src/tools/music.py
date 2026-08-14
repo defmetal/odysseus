@@ -116,3 +116,6 @@ async def _wait_for_job(job_id: str, headers: dict, *, timeout: float = 600.0) -
                     return {"error": body.get("error") or status}
             await asyncio.sleep(1.5)
     return {"error": "music generation timed out"}
+
+# Studio tools are named do_*; routes/agent copy also say generate_music.
+generate_music = do_generate_music

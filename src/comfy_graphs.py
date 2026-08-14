@@ -1188,6 +1188,9 @@ _KNOWN_CLASS_TYPES = {
     # family, entirely distinct from KSampler(Advanced).
     "MiniMaxH3ImageToVideo", "BasicGuider", "RandomNoise", "KSamplerSelect",
     "BasicScheduler", "SamplerCustomAdvanced", "VAEDecodeAudio", "MiniMaxH3SigmaShift",
+    # MiniMax Music 3 (build_minimax_music3_graph()) -- audio, not H3 video.
+    "MiniMaxMusic3TextEncode", "EmptyMiniMaxMusic3LatentAudio",
+    "SaveAudioMP3", "SaveAudio", "SaveAudioAdvanced",
 }
 
 _SAMPLER_CLASS_TYPES = ("KSampler", "KSamplerAdvanced")
@@ -1340,6 +1343,20 @@ def introspect_graph(api_graph: dict) -> dict:
     params["prompt"] = positive_text
     if not h3_no_negative:
         params["negative_prompt"] = negative_text
+
+    encode_ids = by_type.get("MiniMaxMusic3TextEncode") or []
+    if encode_ids:
+        enc_in = nodes[encode_ids[0]].get("inputs", {})
+        params["caption"] = enc_in.get("caption") or params.get("prompt") or ""
+        params["lyrics"] = enc_in.get("lyrics") or ""
+        params["max_duration"] = enc_in.get("max_duration")
+        params["seconds"] = enc_in.get("max_duration")
+        params["cfg_scale"] = enc_in.get("cfg_scale")
+        params["top_k"] = enc_in.get("top_k")
+        if enc_in.get("seed") is not None:
+            params["seed"] = enc_in.get("seed")
+        if not params.get("prompt"):
+            params["prompt"] = params["caption"]
 
     # --- LoRA chain(s): walk the `model` link forward from EVERY UNETLoader ---
     # (not just the first). The image graph only ever has one UNETLoader, so
@@ -2091,3 +2108,120 @@ def apply_model_preset(params: Optional[dict], preset: Optional[dict]) -> dict:
             out["height"] = height
 
     return out
+
+
+# ---------------------------------------------------------------------------
+# MiniMax Music 3 -- appended from origin/cursor/generic-generate-modes-dc98
+# so studio image/video graphs stay intact. Audio, not H3 video.
+# ---------------------------------------------------------------------------
+DEFAULT_MUSIC3_UNET = "minimax_music3_dit_fp16.safetensors"
+DEFAULT_MUSIC3_CLIP = "minimax_music3_text_encoder_pruned_int8_convrot.safetensors"
+DEFAULT_MUSIC3_CLIP_TYPE = "stable_diffusion"
+DEFAULT_MUSIC3_VAE = "minimax_music3_dav.safetensors"
+DEFAULT_MUSIC3_SECONDS = 60.0
+DEFAULT_MUSIC3_STEPS = 20
+DEFAULT_MUSIC3_CFG = 1.0
+DEFAULT_MUSIC3_SAMPLER = "euler"
+DEFAULT_MUSIC3_SCHEDULER = "simple"
+DEFAULT_MUSIC3_FILENAME_PREFIX = "audio/odysseus_music3"
+DEFAULT_MUSIC3_CFG_SCALE = 1.5
+DEFAULT_MUSIC3_TOP_K = 50
+
+
+def build_minimax_music3_graph(params: dict) -> dict:
+    """API-format graph for local MiniMax Music 3 in ComfyUI.
+
+    Params (all optional):
+      caption / prompt, lyrics, seconds / max_duration, seed, randomize_seed,
+      steps, cfg, sampler, scheduler, cfg_scale, top_k, unet, clip, clip_type,
+      vae, filename_prefix, tiled_decode.
+    """
+    caption = str(params.get("caption") or params.get("prompt") or "")
+    lyrics = str(params.get("lyrics") or "")
+    seconds = params.get("seconds")
+    if seconds is None:
+        seconds = params.get("max_duration")
+    seconds = float(seconds) if seconds is not None else DEFAULT_MUSIC3_SECONDS
+    seconds = max(0.04, min(seconds, 300.0))
+
+    seed = params.get("seed")
+    if params.get("randomize_seed") or seed is None:
+        seed = random.randint(0, _SEED_MAX)
+    else:
+        seed = int(seed)
+
+    steps = int(params.get("steps") or DEFAULT_MUSIC3_STEPS)
+    cfg = float(params.get("cfg") if params.get("cfg") is not None else DEFAULT_MUSIC3_CFG)
+    sampler = str(params.get("sampler") or DEFAULT_MUSIC3_SAMPLER)
+    scheduler = str(params.get("scheduler") or DEFAULT_MUSIC3_SCHEDULER)
+    cfg_scale = float(params.get("cfg_scale") if params.get("cfg_scale") is not None else DEFAULT_MUSIC3_CFG_SCALE)
+    top_k = int(params.get("top_k") or DEFAULT_MUSIC3_TOP_K)
+    unet = str(params.get("unet") or DEFAULT_MUSIC3_UNET)
+    clip = str(params.get("clip") or DEFAULT_MUSIC3_CLIP)
+    clip_type = str(params.get("clip_type") or DEFAULT_MUSIC3_CLIP_TYPE)
+    vae = str(params.get("vae") or DEFAULT_MUSIC3_VAE)
+    filename_prefix = str(params.get("filename_prefix") or DEFAULT_MUSIC3_FILENAME_PREFIX)
+
+    nid = _new_id_gen()
+    graph: dict[str, Any] = {}
+
+    unet_id = nid()
+    graph[unet_id] = {
+        "class_type": "UNETLoader",
+        "inputs": {"unet_name": unet, "weight_dtype": "default"},
+    }
+    clip_id = nid()
+    graph[clip_id] = {
+        "class_type": "CLIPLoader",
+        "inputs": {"clip_name": clip, "type": clip_type, "device": "default"},
+    }
+    vae_id = nid()
+    graph[vae_id] = {
+        "class_type": "VAELoader",
+        "inputs": {"vae_name": vae},
+    }
+    encode_id = nid()
+    graph[encode_id] = {
+        "class_type": "MiniMaxMusic3TextEncode",
+        "inputs": {
+            "clip": [clip_id, 0],
+            "caption": caption,
+            "lyrics": lyrics,
+            "seed": seed,
+            "max_duration": seconds,
+            "cfg_scale": cfg_scale,
+            "top_k": top_k,
+        },
+    }
+    latent_id = nid()
+    graph[latent_id] = {
+        "class_type": "EmptyMiniMaxMusic3LatentAudio",
+        "inputs": {"seconds": seconds, "batch_size": 1},
+    }
+    sampler_id = nid()
+    graph[sampler_id] = {
+        "class_type": "KSampler",
+        "inputs": {
+            "model": [unet_id, 0],
+            "positive": [encode_id, 0],
+            "negative": [encode_id, 0],
+            "latent_image": [latent_id, 0],
+            "seed": seed,
+            "steps": steps,
+            "cfg": cfg,
+            "sampler_name": sampler,
+            "scheduler": scheduler,
+            "denoise": 1.0,
+        },
+    }
+    decode_id = nid()
+    decode_inputs: dict[str, Any] = {"samples": [sampler_id, 0], "vae": [vae_id, 0]}
+    if params.get("tiled_decode"):
+        decode_inputs["tiled"] = True
+    graph[decode_id] = {"class_type": "VAEDecodeAudio", "inputs": decode_inputs}
+    save_id = nid()
+    graph[save_id] = {
+        "class_type": "SaveAudioMP3",
+        "inputs": {"audio": [decode_id, 0], "filename_prefix": filename_prefix, "quality": "V0"},
+    }
+    return graph
