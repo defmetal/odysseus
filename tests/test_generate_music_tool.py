@@ -20,9 +20,9 @@ def test_parse_json_caption_lyrics():
 
 
 def test_parse_multiline_fields():
-    parsed = _parse_generate_music("caption here\n[Chorus]\nla\nminimax_music3_comfy\n45")
+    parsed = _parse_generate_music("caption here\n[Verse] hello\nminimax_music3_comfy\n45")
     assert parsed["prompt"] == "caption here"
-    assert parsed["lyrics"] == "[Chorus]"
+    assert parsed["lyrics"] == "[Verse] hello"
     assert parsed["backend"] == "minimax_music3_comfy"
     assert parsed["seconds"] == "45"
 

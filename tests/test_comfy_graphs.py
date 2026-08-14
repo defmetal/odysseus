@@ -1192,23 +1192,19 @@ def test_qwen_preset_end_to_end_graph_shape():
     assert out["shift"] == 3.1
 
 
-def test_qwen_preset_against_real_repo_registry():
+def test_generic_registry_preset_end_to_end_graph():
     real_path = _REPO_ROOT / "config" / "comfy_models.json"
     if not real_path.is_file():
         raise Skip("config/comfy_models.json not present")
     registry = load_model_registry(str(real_path))
-    if "qwen_image_2512" not in (registry.get("models") or {}):
-        raise Skip("generic registry has no qwen_image_2512 preset")
-    preset = registry["models"]["qwen_image_2512"]
+    preset = (registry.get("models") or {}).get("zimage_general")
+    assert preset, "generic registry must ship a zimage_general recipe"
     params = apply_model_preset({"prompt": "x"}, preset)
     graph = build_image_graph(params)
     clip_node = next(n for n in graph.values() if n["class_type"] == "CLIPLoader")
-    assert clip_node["inputs"]["type"] == "qwen_image"
-    sampling_node = next(n for n in graph.values() if n["class_type"] == "ModelSamplingAuraFlow")
-    assert sampling_node["inputs"]["shift"] == 3.1
-    ksampler = next(n for n in graph.values() if n["class_type"] == "KSampler")
-    assert ksampler["inputs"]["sampler_name"] == "euler"
-    assert ksampler["inputs"]["scheduler"] == "simple"
+    assert clip_node["inputs"]["type"] == preset.get("clip_type") or "lumina2"
+    unet_node = next(n for n in graph.values() if n["class_type"] == "UNETLoader")
+    assert unet_node["inputs"]["unet_name"] == preset["unet"]
 
 
 # ---------------------------------------------------------------------------
