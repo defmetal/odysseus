@@ -19,8 +19,10 @@ from src.llm_core import (
     _normalize_http_status,
     llm_call_async,
     llm_call_async_with_route_fallback,
+    parse_thinking_enabled,
     stream_llm,
     stream_llm_with_fallback,
+    thinking_pref,
 )
 from src.agent_loop import stream_agent_loop
 from src import agent_runs
@@ -797,16 +799,20 @@ def setup_chat_routes(
                 owner=owner,
             )
         requested_model = sess.model
-        reply, actual_candidate, actual_model = await llm_call_async_with_route_fallback(
-            foreground_candidates,
-            request_messages,
-            fallback_statuses=foreground_policy.eligible_statuses,
-            candidate_request_factory=candidate_request_factory,
-            temperature=ctx.preset.temperature,
-            max_tokens=ctx.preset.max_tokens,
-            prompt_type=preset_id,
-            session_id=session,
-        )
+        with thinking_pref(
+            parse_thinking_enabled(chat_request.thinking_enabled),
+            chat_request.reasoning_effort,
+        ):
+            reply, actual_candidate, actual_model = await llm_call_async_with_route_fallback(
+                foreground_candidates,
+                request_messages,
+                fallback_statuses=foreground_policy.eligible_statuses,
+                candidate_request_factory=candidate_request_factory,
+                temperature=ctx.preset.temperature,
+                max_tokens=ctx.preset.max_tokens,
+                prompt_type=preset_id,
+                session_id=session,
+            )
         actual_index = _candidate_index(foreground_candidates, actual_candidate)
         apply_compaction_state(
             sess,
@@ -899,6 +905,9 @@ def setup_chat_routes(
         # actually get bash enabled.
         allow_bash = form_data.get("allow_bash") or (body or {}).get("allow_bash")
         allow_web_search = form_data.get("allow_web_search") or (body or {}).get("allow_web_search")
+        thinking_enabled = form_data.get("thinking_enabled") or (body or {}).get("thinking_enabled")
+        reasoning_effort = form_data.get("reasoning_effort") or (body or {}).get("reasoning_effort")
+        _thinking_on = parse_thinking_enabled(thinking_enabled)
         use_rag = form_data.get("use_rag")
         search_context = form_data.get("search_context")  # pre-fetched web search results (compare mode)
         compare_mode = str(form_data.get("compare_mode", "")).lower() == "true"
@@ -2352,8 +2361,9 @@ def setup_chat_routes(
             """Wrapper that guarantees _active_streams cleanup even if stream_with_save
             raises before reaching a mode-specific finally block."""
             try:
-                async for chunk in stream_with_save():
-                    yield chunk
+                with thinking_pref(_thinking_on, reasoning_effort):
+                    async for chunk in stream_with_save():
+                        yield chunk
             finally:
                 _active_streams.pop(session, None)
 

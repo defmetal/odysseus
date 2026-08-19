@@ -1852,6 +1852,11 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
 	        fd.set('plan_mode', 'false');
 	      }
       fd.append('allow_bash', el('bash-toggle').checked ? 'true' : 'false');
+      const thinkChk = el('think-toggle');
+      fd.append('thinking_enabled', (thinkChk && thinkChk.checked) ? 'true' : 'false');
+      const _thinkState = Storage.loadToggleState() || {};
+      const _effort = _thinkState.reasoning_effort;
+      fd.append('reasoning_effort', (_effort === 'low' || _effort === 'medium' || _effort === 'high') ? _effort : 'medium');
       if (workspaceAgentIntent) fd.set('allow_bash', 'true');
       const ragChk = el('rag-toggle');
       if (ragChk && !ragChk.checked) {

@@ -2659,6 +2659,43 @@ body.bg-pattern-sparkles {
 	      color: var(--fg);
 	      background: color-mix(in srgb, var(--fg) 9%, transparent);
 	    }
+    .think-effort {
+      display: none;
+      align-items: center;
+      flex-shrink: 0;
+      background: color-mix(in srgb, var(--fg) 7%, transparent);
+      border-radius: 7px;
+      padding: 1px;
+      gap: 0;
+    }
+    #think-toggle-btn.active + .think-effort {
+      display: flex;
+    }
+    #think-toggle-btn.toolbar-collapsed + .think-effort {
+      display: none !important;
+    }
+    .think-effort-btn {
+      background: none;
+      border: none;
+      color: var(--fg);
+      opacity: 0.45;
+      font-size: 10px;
+      font-weight: 600;
+      font-family: inherit;
+      letter-spacing: 0.02em;
+      padding: 3px 6px;
+      border-radius: 6px;
+      cursor: pointer;
+      line-height: 1.2;
+    }
+    .think-effort-btn:hover {
+      opacity: 0.85;
+      background: color-mix(in srgb, var(--accent) 8%, transparent);
+    }
+    .think-effort-btn.active {
+      opacity: 1;
+      background: color-mix(in srgb, var(--fg) 10%, transparent);
+    }
 	    .plan-mode-btn {
 	      width: 28px;
 	      height: 28px;
