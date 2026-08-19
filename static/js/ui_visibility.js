@@ -34,6 +34,7 @@ export const UI_VIS_MAP = {
   'welcome-text':        '.welcome-name, .welcome-sub, #welcome-tip',
   'incognito-btn':       '.incognito-btn',
   'web-toggle-btn':      '#web-toggle-btn',
+  'think-toggle-btn':    '#think-toggle-btn, #think-effort',
   'doc-toggle-btn':      '#overflow-doc-btn',
   'rag-toggle-btn':      '#overflow-rag-btn',
   'bash-toggle-btn':     '#bash-toggle-btn',

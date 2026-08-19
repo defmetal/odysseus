@@ -342,3 +342,19 @@ def test_frontend_sends_explicit_allow_web_search_false_in_agent_mode():
     assert "fd.append('allow_web_search', el('web-toggle').checked ? 'true' : 'false')" in source, (
         "Frontend must send explicit allow_web_search=false in agent mode when toggle is off"
     )
+
+
+def test_frontend_sends_thinking_enabled_and_reasoning_effort():
+    """chat.js must always send thinking_enabled + reasoning_effort (UI low/medium/high)."""
+    source = _CHAT_JS.read_text(encoding="utf-8")
+    assert "fd.append('thinking_enabled'" in source
+    assert "fd.append('reasoning_effort'" in source
+
+
+def test_chat_stream_reads_thinking_fields_from_body():
+    """chat_stream must read thinking_enabled / reasoning_effort from form or JSON body."""
+    source = _CHAT_ROUTES.read_text(encoding="utf-8")
+    assert "thinking_enabled" in source
+    assert "reasoning_effort" in source
+    assert "thinking_pref(" in source
+    assert "parse_thinking_enabled" in source
