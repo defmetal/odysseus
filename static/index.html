@@ -257,9 +257,9 @@
        real request is discarded and the font fetched a second time. -->
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/static/fonts/FiraCode-Regular.woff2">
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/static/fonts/FiraCode-SemiBold.woff2">
-  <link rel="stylesheet" href="/static/style.css?v=20260808startupshell1">
+  <link rel="stylesheet" href="/static/style.css?v=20260815timeshare1">
   <link rel="modulepreload" href="/static/app.js?v=20260808startupshell1">
-  <link rel="modulepreload" href="/static/js/chat.js?v=20260801fix1">
+  <link rel="modulepreload" href="/static/js/chat.js?v=20260825force1">
   <link rel="modulepreload" href="/static/js/ui.js">
   <link rel="modulepreload" href="/static/js/sessions.js">
   <link rel="modulepreload" href="/static/js/markdown.js">
@@ -1160,6 +1160,25 @@
               <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
             </svg>
           </button>
+          <!-- Thinking (brain) + Low/Med/High effort -->
+          <button type="button" class="input-icon-btn" title="Thinking" id="think-toggle-btn" aria-label="Thinking" aria-pressed="true">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
+              <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
+              <path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/>
+              <path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/>
+              <path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"/>
+              <path d="M3.477 10.896a4 4 0 0 1 .585-.396"/>
+              <path d="M19.938 10.5a4 4 0 0 1 .585.396"/>
+              <path d="M6 18a4 4 0 0 1-1.967-.516"/>
+              <path d="M19.967 17.484A4 4 0 0 1 18 18"/>
+            </svg>
+          </button>
+          <div class="think-effort" id="think-effort" role="group" aria-label="Thinking effort">
+            <button type="button" class="think-effort-btn" data-effort="low" aria-pressed="false">Low</button>
+            <button type="button" class="think-effort-btn active" data-effort="medium" aria-pressed="true">Med</button>
+            <button type="button" class="think-effort-btn" data-effort="high" aria-pressed="false">High</button>
+          </div>
           <!-- Shell commands (terminal) -->
           <button type="button" class="input-icon-btn" title="Shell Access" id="bash-toggle-btn" data-mode-tool="true" aria-label="Shell access" aria-pressed="false">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1238,6 +1257,7 @@
       <!-- Hidden checkboxes for state -->
       <input type="checkbox" id="web-toggle" style="display:none;">
       <input type="checkbox" id="bash-toggle" style="display:none;">
+      <input type="checkbox" id="think-toggle" style="display:none;" checked>
       <input type="checkbox" id="plan-toggle" style="display:none;">
     </div>
     <form id="chat-form" autocomplete="off" action="javascript:void(0);" style="display:none;"></form>
@@ -1942,6 +1962,11 @@
                 <input type="checkbox" checked data-ui-key="web-toggle-btn"><span class="vis-switch"></span>
               </label>
               <label class="vis-row">
+                <span class="vis-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/></svg></span>
+                <span class="vis-label">Thinking <span class="vis-hint">Chat-bar Think toggle + effort</span></span>
+                <input type="checkbox" checked data-ui-key="think-toggle-btn"><span class="vis-switch"></span>
+              </label>
+              <label class="vis-row">
                 <span class="vis-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></span>
                 <span class="vis-label">Document Editor</span>
                 <input type="checkbox" checked data-ui-key="doc-toggle-btn"><span class="vis-switch"></span>
@@ -2555,7 +2580,7 @@
 <script type="module" src="/static/js/chatRenderer.js?v=20260722emailfastindex1"></script>
 <script type="module" src="/static/js/codeRunner.js"></script>
 <script type="module" src="/static/js/chatStream.js?v=20260722emailfastindex1"></script>
-  <script type="module" src="/static/js/chat.js?v=20260801fix1"></script>
+  <script type="module" src="/static/js/chat.js?v=20260825force1"></script>
 <script type="module" src="/static/js/cookbook.js"></script>
 <script src="/static/js/cookbookSchedule.js"></script>
 <script type="module" src="/static/js/search-chat.js"></script>

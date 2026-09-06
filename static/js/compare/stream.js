@@ -6,6 +6,7 @@ import markdownModule from '../markdown.js';
 import spinnerModule from '../spinner.js';
 import uiModule from '../ui.js';
 import presetsModule from '../presets.js';
+import Storage from '../storage.js';
 
 var escapeHtml = uiModule.esc;
 
@@ -241,6 +242,11 @@ async function streamToPane(paneIdx, sessionId, message, aiMsgEl, opts) {
       fd.append('mode', 'chat');
       fd.append('use_rag', 'false');
     }
+    const thinkChk = document.getElementById('think-toggle');
+    fd.append('thinking_enabled', (thinkChk && thinkChk.checked) ? 'true' : 'false');
+    const _thinkState = Storage.loadToggleState() || {};
+    const _effort = _thinkState.reasoning_effort;
+    fd.append('reasoning_effort', (_effort === 'low' || _effort === 'medium' || _effort === 'high') ? _effort : 'medium');
     const incognitoChk = document.getElementById('incognito-toggle');
     if (incognitoChk && incognitoChk.checked) {
       fd.append('incognito', 'true');

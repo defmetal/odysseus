@@ -10,9 +10,10 @@ import threading
 import re
 import os
 import math
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from fastapi import HTTPException
-from typing import Optional, Dict, List, Tuple
+from typing import NamedTuple, Optional, Dict, List, Tuple
 from src.model_context import get_context_length, DEFAULT_CONTEXT, is_local_endpoint
 from urllib.parse import urlparse
 
@@ -764,6 +765,10 @@ def _build_ollama_payload(
         payload["options"] = options
     if tools:
         payload["tools"] = _alias_harmony_tools(tools, model)
+    apply_thinking_to_payload(payload, model)
+    pref = _thinking_pref.get()
+    if pref is not None:
+        payload["think"] = bool(pref.enabled)
     return payload
 
 
@@ -1449,6 +1454,174 @@ def _supports_thinking(model: str) -> bool:
     m = model.lower()
     return any(p in m for p in _THINKING_MODEL_PATTERNS)
 
+
+# ── Chat-bar thinking preference (request-scoped) ──────────────────────────
+# UI sends thinking_enabled + reasoning_effort (low|medium|high). High maps
+# to `xhigh` for Qwen 3.8 / NVFP4 / local vLLM Qwen (those servers 400 on
+# `high`); other vendors keep `high`. Think-off sends enable_thinking=false
+# and omits effort so a bogus value cannot 400 the turn.
+
+_UI_REASONING_EFFORTS = frozenset({"low", "medium", "high"})
+_LOCAL_VLLM_HOSTS = frozenset({
+    "localhost", "127.0.0.1", "0.0.0.0", "::1", "host.docker.internal",
+})
+
+
+class ThinkingPref(NamedTuple):
+    enabled: bool
+    effort: str  # UI value: low | medium | high
+
+
+_thinking_pref: ContextVar[Optional[ThinkingPref]] = ContextVar(
+    "thinking_pref", default=None,
+)
+
+
+def parse_thinking_enabled(value) -> Optional[bool]:
+    """Parse a form/JSON thinking_enabled field. None = omitted (no override)."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    s = str(value).strip().lower()
+    if s in {"true", "1", "yes", "on"}:
+        return True
+    if s in {"false", "0", "no", "off"}:
+        return False
+    return None
+
+
+def normalize_ui_reasoning_effort(value) -> str:
+    """Coerce a UI/API effort string to low|medium|high. Default medium."""
+    s = str(value or "").strip().lower()
+    if s in _UI_REASONING_EFFORTS:
+        return s
+    if s in {"med", "mid"}:
+        return "medium"
+    if s in {"xhigh", "x-high", "extra-high", "extra_high"}:
+        return "high"
+    return "medium"
+
+
+def _is_local_vllm_url(url: str) -> bool:
+    """True for a local OpenAI-compat vLLM host (studio serve is :8500)."""
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if host not in _LOCAL_VLLM_HOSTS:
+        return False
+    port = parsed.port
+    if port == 11434:
+        return False
+    path = parsed.path or ""
+    if port == 8500:
+        return True
+    return bool(port and "/v1" in path)
+
+
+def uses_xhigh_reasoning_effort(model: str, url: str = "") -> bool:
+    """Qwen 3.8 / NVFP4 / local vLLM Qwen want High → xhigh, not high."""
+    m = (model or "").lower()
+    u = (url or "").lower()
+    if "nvfp4" in m or "nvfp4" in u:
+        return True
+    if re.search(r"qwen[\s._-]*3[\s._-]*8", m):
+        return True
+    if "qwen" in m and _is_local_vllm_url(url):
+        return True
+    return False
+
+
+def map_reasoning_effort(ui_effort: str, model: str, url: str = "") -> str:
+    """Map UI low/medium/high to the wire value for this model/url."""
+    effort = normalize_ui_reasoning_effort(ui_effort)
+    if effort == "high":
+        return "xhigh" if uses_xhigh_reasoning_effort(model, url) else "high"
+    return effort
+
+
+@contextmanager
+def thinking_pref(enabled: Optional[bool], effort: Optional[str] = None):
+    """Bind this request's Think toggle for every payload builder in the task."""
+    if enabled is None:
+        yield
+        return
+    token = _thinking_pref.set(
+        ThinkingPref(enabled=bool(enabled), effort=normalize_ui_reasoning_effort(effort))
+    )
+    try:
+        yield
+    finally:
+        _thinking_pref.reset(token)
+
+
+def apply_thinking_to_payload(payload: Dict, model: str, url: str = "") -> None:
+    """Stamp reasoning_effort + chat_template_kwargs from the request pref.
+
+    No-op when the chat bar did not send a preference (background LLM calls
+    keep their existing Mistral/Ollama defaults).
+    """
+    pref = _thinking_pref.get()
+    if pref is None or not isinstance(payload, dict):
+        return
+    kwargs = payload.get("chat_template_kwargs")
+    if not isinstance(kwargs, dict):
+        kwargs = {}
+        payload["chat_template_kwargs"] = kwargs
+    kwargs["enable_thinking"] = bool(pref.enabled)
+    if pref.enabled:
+        payload["reasoning_effort"] = map_reasoning_effort(pref.effort, model, url)
+    else:
+        payload.pop("reasoning_effort", None)
+    if _is_ollama_openai_compat_url(url) or _is_ollama_native_url(url):
+        payload["think"] = bool(pref.enabled)
+
+
+def _payload_has_reasoning_controls(payload: Dict) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("reasoning_effort") is not None:
+        return True
+    kwargs = payload.get("chat_template_kwargs")
+    return isinstance(kwargs, dict) and "enable_thinking" in kwargs
+
+
+def _strip_reasoning_controls(payload: Dict) -> bool:
+    """Drop thinking fields so a 400 can be retried. Returns True if changed."""
+    if not isinstance(payload, dict):
+        return False
+    changed = False
+    if "reasoning_effort" in payload:
+        payload.pop("reasoning_effort", None)
+        changed = True
+    kwargs = payload.get("chat_template_kwargs")
+    if isinstance(kwargs, dict) and "enable_thinking" in kwargs:
+        kwargs.pop("enable_thinking", None)
+        if not kwargs:
+            payload.pop("chat_template_kwargs", None)
+        changed = True
+    return changed
+
+
+def _retry_without_reasoning_controls(payload: Dict, status: int, text: str) -> bool:
+    """Log + strip thinking fields on HTTP 400 so an unknown effort cannot break chat."""
+    if status != 400:
+        return False
+    if not _payload_has_reasoning_controls(payload):
+        return False
+    if not _strip_reasoning_controls(payload):
+        return False
+    logger.warning(
+        "Upstream rejected reasoning controls (%s); retrying without them: %s",
+        status,
+        (text or "")[:240],
+    )
+    return True
+
 def _normalize_mistral_content(content):
     """Mistral returns content as a structured array when reasoning is on:
         [{"type": "thinking", "thinking": [{"type": "text", "text": "..."}], "closed": true},
@@ -2034,9 +2207,15 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         _apply_local_generation_stability(payload, target_url, model)
         if provider == "mistral" and _supports_thinking(model):
             payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
+        apply_thinking_to_payload(payload, model, target_url)
     try:
         note_model_activity(target_url, model)
         r = httpx_post_kimi_aware(target_url, h, json=payload, timeout=timeout)
+        if (
+            not r.is_success
+            and _retry_without_reasoning_controls(payload, r.status_code, r.text)
+        ):
+            r = httpx_post_kimi_aware(target_url, h, json=payload, timeout=timeout)
     except Exception as e:
         raise HTTPException(502, f"POST {target_url} failed: {e}")
     if not r.is_success:
@@ -2397,6 +2576,7 @@ async def llm_call_async(
             payload["think"] = False
         if provider == "mistral" and _supports_thinking(model):
             payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
+        apply_thinking_to_payload(payload, model, target_url)
         _apply_local_cache_affinity(payload, url, session_id)
         _apply_local_generation_stability(payload, target_url, model)
 
@@ -2420,6 +2600,8 @@ async def llm_call_async(
                     f"LLM async call to {target_url} failed in {duration:.2f}s "
                     f"(attempt {attempt}): HTTP {r.status_code} {friendly}"
                 )
+                if _retry_without_reasoning_controls(payload, r.status_code, r.text):
+                    continue
                 if r.status_code in (429, 502, 503, 504) and attempt < max_retries:
                     await asyncio.sleep(LLMConfig.RETRY_DELAY)
                     continue
@@ -2656,6 +2838,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         # <think> blocks. Ollama /v1 accepts "think": false as a top-level param.
         if _is_ollama_openai_compat_url(url) and _supports_thinking(model):
             payload["think"] = False
+        apply_thinking_to_payload(payload, model, target_url)
         _apply_local_cache_affinity(payload, url, session_id)
         _apply_local_generation_stability(payload, target_url, model)
         _scrub_openai_chat_tool_reasoning(payload, target_url, model)
@@ -3087,10 +3270,18 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     try:
         client = _get_http_client()
         h = await apply_kimi_code_headers_async(client, h, target_url)
-        async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
+        _reasoning_retried = False
+        while True:
+          async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
             _clear_host_dead(target_url)
             if r.status_code != 200:
                 raw = (await r.aread()).decode(errors="replace")
+                if (
+                    not _reasoning_retried
+                    and _retry_without_reasoning_controls(payload, r.status_code, raw)
+                ):
+                    _reasoning_retried = True
+                    continue
                 friendly = _format_upstream_error(r.status_code, raw, target_url)
                 yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500]})}\n\n'
                 return
@@ -3341,6 +3532,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             if tc_event:
                 yield tc_event
             yield "data: [DONE]\n\n"
+          break
 
     except (httpx.ConnectError, httpx.ConnectTimeout) as e:
         _cooled = _mark_host_dead(target_url)

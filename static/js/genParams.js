@@ -29,6 +29,8 @@ import sessionModule from './sessions.js';
 import chatRenderer from './chatRenderer.js?v=20260722emailfastindex1';
 import { formatElapsed } from './research/jobs.js?v=20260630researchthumb';
 import { bindMenuDismiss } from './escMenuStack.js';
+import { gpuStatus, prepareGpuFor, GPU_SWITCH_MESSAGE } from './gpuTimeshare.js?v=20260815timeshare1';
+import fileHandler from './fileHandler.js';
 
 const { esc, showToast, scrollHistory } = uiModule;
 
@@ -845,11 +847,13 @@ function _resetToModelDefaults(kind) {
   }
   const modelEntry = _modelEntry(_effectiveModelKey(_effective(kind, sid)));
   if (!modelEntry) { showToast('Model info not loaded yet.'); return; }
-  _clearTouched(kind, Array.from(_RESEED_FIELDS));
+  _clearTouched(kind, Array.from(_RESEED_FIELDS).concat(['mode', 'input_image']));
   const patch = _modelDefaultsPatch(modelEntry);
   Object.entries(patch).forEach(([k, v]) => _setField(kind, k, v, false));
   ['unet', 'clip', 'clip_type', 'vae'].forEach(k => _setField(kind, k, '', false));
   _setField(kind, 'loras', null, false);
+  _setField(kind, 'mode', 'txt2img', false);
+  _setField(kind, 'input_image', null, false);
   showToast('Reset to "' + (modelEntry.name || kind) + '" defaults.');
   _renderPanel();
 }
@@ -1474,6 +1478,7 @@ function _ensureHolderForVisibleJob(job) {
       percent: job.lastPercent || 0,
       elapsedMs: Date.now() - job.startedAt,
     });
+    _showRewriteNote(job);
   }
 }
 
@@ -1792,6 +1797,14 @@ function _onJobDone(job, data) {
       const bubble = isVideo
         ? chatRenderer.buildVideoBubble(img.url, job.prompt)
         : chatRenderer.buildImageBubble(img.url, job.prompt, job.kind === 'video' ? 'video' : 'image', `${job.params.width}x${job.params.height}`, null, img.gallery_id);
+      if (bubble && job.usedRewrite && job.rewrittenPrompt) {
+        const note = document.createElement('div');
+        note.className = 'gen-rewrite-note';
+        note.style.cssText = 'opacity:0.75;font-size:0.85em;margin-top:0.35em;';
+        note.textContent = 'Rewrote: ' + job.rewrittenPrompt;
+        const body = bubble.querySelector('.body') || bubble;
+        body.appendChild(note);
+      }
       if (box) box.appendChild(bubble);
     });
     if (box) scrollHistory();
@@ -1878,14 +1891,51 @@ function _connectStream(job) {
   }
 }
 
+// Paperclip attach on Image tab used to be ignored: chat.js hands generate()
+// only the prompt text, and _buildParamsPayload() only sends input_image when
+// mode is already img2img with a panel upload. If a pending image is sitting
+// on the composer and there is no source yet, upload it to Comfy and flip
+// to img2img so Generate restyles the photo.
+async function _adoptPendingImageIfNeeded(kind, sid) {
+  if (kind !== 'image') return;
+  const already = _resolvedInputImageName(_effective(kind, sid).input_image);
+  if (already) return;
+  let files = [];
+  try { files = fileHandler.getPendingRaw() || []; } catch (_) { return; }
+  const file = files.find((f) => f && (((f.type || '').startsWith('image/')) || /\.(png|jpe?g|webp|bmp|gif)$/i.test(f.name || '')));
+  if (!file) return;
+  _setField(kind, 'mode', 'img2img');
+  await _uploadInputImage(kind, file, 'input_image');
+  try { fileHandler.clearPending(); } catch (_) {}
+  if (!_resolvedInputImageName(_effective(kind, sid).input_image)) {
+    throw new Error('Could not use the attached image as an img2img source.');
+  }
+}
+
+
+// Image rewrite opt-out. Tokens are stripped from the CLIP prompt.
+// -force / -raw : send skip_rewrite so the CPU rewriter does not run.
+function _stripRewriteForce(text) {
+  const src = String(text || '');
+  const re = /(?:^|\s)(-force|-raw)\b/gi;
+  let skip = false;
+  const prompt = src.replace(re, () => { skip = true; return ' '; }).replace(/\s+/g, ' ').trim();
+  return { prompt, skipRewrite: skip };
+}
+
 export async function generate(kind, promptText, sessionId) {
   const sid = sessionId || sessionModule.getCurrentSessionId();
   if (!sid) { showToast('No active chat session.'); return; }
   if (_activeJobs.has(sid)) { showToast('A generation is already running in this chat.'); return; }
   if (!promptText || !promptText.trim()) { showToast('Type a prompt first.'); return; }
 
+  const _force = kind === 'image' ? _stripRewriteForce(promptText) : { prompt: promptText.trim(), skipRewrite: false };
+  if (kind === 'image') promptText = _force.prompt;
+  if (!promptText || !promptText.trim()) { showToast('Type a prompt first.'); return; }
+
   if (kind === 'music') await _fetchMusicBackends();
   else await Promise.all([_fetchOptions(), _fetchWorkflows()]);
+  if (kind === 'image') await _adoptPendingImageIfNeeded(kind, sid);
   const effective = _effective(kind, sid);
   const params = _buildParamsPayload(kind, effective, promptText.trim());
 
@@ -1898,9 +1948,20 @@ export async function generate(kind, promptText, sessionId) {
   // guessing at backend formatting -- it appears on next reload.
   chatRenderer.addMessage('user', promptText.trim());
 
+  // Register the job before any GPU wait so a second generate cannot start.
   const holder = _mountProgressBubble(kind);
   const job = { sessionId: sid, kind, prompt: promptText.trim(), params, holder, startedAt: Date.now() };
   _activeJobs.set(sid, job);
+
+  // GPU time-share: only on generate, never on tab click / onModeChange.
+  try {
+    const st = await gpuStatus(kind);
+    if (st && st.switch_needed) {
+      _updateProgressDom(holder, { label: GPU_SWITCH_MESSAGE });
+      await prepareGpuFor(kind, { onSwitching: () => {} });
+    }
+  } catch (_) {}
+  _updateProgressDom(holder, { label: 'Queued…' });
 
   if (holder) {
     const cancelBtn = holder.querySelector('.gen-progress-cancel');
@@ -1912,7 +1973,7 @@ export async function generate(kind, promptText, sessionId) {
     const url = isMusic ? `${API_BASE}/api/music/generate` : `${API_BASE}/api/comfy/generate`;
     const body = isMusic
       ? { session_id: sid, params: { ...params, prompt: promptText.trim() } }
-      : { kind, workflow: effective.workflow || 'Custom', session_id: sid, params };
+      : { kind, workflow: effective.workflow || 'Custom', session_id: sid, params, skip_rewrite: !!(kind === 'image' && _force.skipRewrite) };
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1925,6 +1986,13 @@ export async function generate(kind, promptText, sessionId) {
     }
     job.jobId = data.job_id;
     job.promptId = data.prompt_id;
+    if (kind === 'image') {
+      job.originalPrompt = data.original_prompt || job.prompt;
+      job.rewrittenPrompt = data.rewritten_prompt || job.prompt;
+      job.usedRewrite = !!data.used_rewrite;
+      job.skipRewrite = !!_force.skipRewrite;
+      _showRewriteNote(job);
+    }
     _rememberInflight(job);
     _connectStream(job);
   } catch (e) {
@@ -1933,6 +2001,21 @@ export async function generate(kind, promptText, sessionId) {
     // chat.js's .catch() on generate() would show a second, redundant toast.
     _onJobError(job, e.message || 'Failed to start generation');
   }
+}
+
+function _showRewriteNote(job) {
+  if (!job) return;
+  const holder = job.holder;
+  if (!holder || !document.body.contains(holder)) return;
+  const body = holder.querySelector('.body');
+  if (!body || body.querySelector('.gen-rewrite-note')) return;
+  const note = document.createElement('div');
+  note.className = 'gen-rewrite-note';
+  note.style.cssText = 'opacity:0.75;font-size:0.85em;margin-top:0.4em;';
+  if (job.skipRewrite) note.textContent = 'Rewrite off (-force)';
+  else if (job.usedRewrite && job.rewrittenPrompt) note.textContent = 'Rewrote: ' + job.rewrittenPrompt;
+  else return;
+  body.appendChild(note);
 }
 
 export default { init, onModeChange, onSessionSwitch, generate, isBusy };

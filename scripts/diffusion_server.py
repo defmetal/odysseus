@@ -59,8 +59,9 @@ _apply_style = None
 # registry load + prompt-scan logic lives in data/studio/scripts/characters.py
 # (no torch import, so it's unit-testable standalone -- see
 # test_characters_registry.py).
-_characters_registry = {}   # trigger -> {name, lora, weight, enabled}
+_characters_registry = {}   # trigger -> {name, lora, weight, prompt_suffix, enabled}
 _detect_character = None    # characters.detect_character, once loaded
+_apply_character_suffix = None  # characters.apply_prompt_suffix, once loaded
 
 # Style/character variant: with FP8 the LoRA(s) are fused into the weights at
 # load, so a single loaded pipeline is permanently one of:
@@ -168,7 +169,7 @@ def _load_characters_config(path: str):
     Tolerant of a missing file, malformed JSON, or malformed entries -- logs a
     warning and leaves the registry empty, i.e. serves with characters
     disabled (styled/general only); never raises."""
-    global _characters_registry, _detect_character
+    global _characters_registry, _detect_character, _apply_character_suffix
     if not path:
         return
     try:
@@ -176,9 +177,10 @@ def _load_characters_config(path: str):
         d = str(_P(path).resolve().parent)
         if d not in sys.path:
             sys.path.insert(0, d)
-        from characters import load_registry, detect_character
+        from characters import load_registry, detect_character, apply_prompt_suffix
         _characters_registry = load_registry(path)
         _detect_character = detect_character
+        _apply_character_suffix = apply_prompt_suffix
         n_enabled = sum(1 for v in _characters_registry.values() if v.get("enabled"))
         logger.info(f"Character registry loaded from {path}: "
                     f"{len(_characters_registry)} character(s), {n_enabled} enabled")
@@ -186,6 +188,7 @@ def _load_characters_config(path: str):
         logger.warning(f"Could not load character registry {path}: {e} -- serving without characters")
         _characters_registry = {}
         _detect_character = None
+        _apply_character_suffix = None
 
 
 def _styled(prompt: str) -> str:
@@ -208,10 +211,13 @@ def _styled(prompt: str) -> str:
     if _variant and _variant.startswith("char:"):
         entry = _characters_registry.get(_variant[5:]) or {}
         _suffix = entry.get("prompt_suffix") or ""
-        _add = [ph.strip() for ph in _suffix.split(",")
-                if ph.strip() and ph.strip().lower() not in out.lower()]
-        if _add:
-            out = out.rstrip().rstrip(",") + ", " + ", ".join(_add)
+        if _apply_character_suffix is not None:
+            out = _apply_character_suffix(out, _suffix)
+        else:
+            _add = [ph.strip() for ph in _suffix.split(",")
+                    if ph.strip() and ph.strip().lower() not in out.lower()]
+            if _add:
+                out = out.rstrip().rstrip(",") + ", " + ", ".join(_add)
     return out
 
 
@@ -301,6 +307,7 @@ class ImageRequest(BaseModel):
     size: str = "1024x1024"
     quality: str = "medium"
     response_format: str = "b64_json"
+    seed: int = 0  # 0 = unseeded; product smoke uses 42/1042
     # img2img: when `image` (base64) is present, generations runs img2img
     # instead of txt2img. This is what Odysseus's gallery style-transfer posts.
     image: str = ""
@@ -1009,6 +1016,8 @@ def generate_image(req: ImageRequest):
                 num_inference_steps=steps,
                 guidance_scale=_args.guidance,
             )
+            if getattr(req, 'seed', 0):
+                _gen_kwargs['generator'] = torch.Generator('cuda').manual_seed(int(req.seed))
             _neg = _negative_default()
             if _neg:
                 _gen_kwargs["negative_prompt"] = _neg
@@ -1032,6 +1041,12 @@ def generate_image(req: ImageRequest):
     return {
         "created": int(time.time()),
         "data": images,
+        "resolved_prompt": req.prompt,
+        "seed": getattr(req, 'seed', 0),
+        "steps": steps,
+        "guidance": getattr(_args, 'guidance', None),
+        "variant": _variant,
+        "recipe": dict(_loaded_recipe or {}),
     }
 
 

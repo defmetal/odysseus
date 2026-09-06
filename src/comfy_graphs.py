@@ -2116,7 +2116,7 @@ def apply_model_preset(params: Optional[dict], preset: Optional[dict]) -> dict:
 # ---------------------------------------------------------------------------
 DEFAULT_MUSIC3_UNET = "minimax_music3_dit_fp16.safetensors"
 DEFAULT_MUSIC3_CLIP = "minimax_music3_text_encoder_pruned_int8_convrot.safetensors"
-DEFAULT_MUSIC3_CLIP_TYPE = "stable_diffusion"
+DEFAULT_MUSIC3_CLIP_TYPE = "minimax"
 DEFAULT_MUSIC3_VAE = "minimax_music3_dav.safetensors"
 DEFAULT_MUSIC3_SECONDS = 60.0
 DEFAULT_MUSIC3_STEPS = 20

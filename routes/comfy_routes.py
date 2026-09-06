@@ -174,6 +174,10 @@ class GenerateRequest(BaseModel):
     workflow: Optional[str] = None
     session_id: Optional[str] = None
     params: GenerateParams = GenerateParams()
+    # Debug escape hatch for Image-tab CPU prompt rewrite. Default ON for
+    # kind == "image"; video/music never rewrite. Query ?skip_rewrite=true
+    # is also honored in comfy_generate().
+    skip_rewrite: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -1226,11 +1230,37 @@ def setup_comfy_routes() -> APIRouter:
     @router.post("/api/comfy/generate")
     async def comfy_generate(body: GenerateRequest, request: Request):
         user = require_privilege(request, "can_generate_images")
+        try:
+            from routes.gpu_routes import _load_helper
+            await _load_helper().prepare_for(body.kind)
+        except Exception:
+            logger.warning("gpu prepare_for(%s) skipped", body.kind, exc_info=True)
 
         if body.kind not in ("image", "video"):
             raise HTTPException(400, f"Unknown kind: {body.kind!r}")
 
         params = body.params.model_dump()
+        rewrite_info = {
+            "original": (body.params.prompt or "").strip(),
+            "rewritten": (body.params.prompt or "").strip(),
+            "model": None,
+            "used_rewrite": False,
+        }
+        skip_rewrite = bool(body.skip_rewrite)
+        q_skip = str(request.query_params.get("skip_rewrite") or "").strip().lower()
+        if q_skip in {"1", "true", "yes", "on"}:
+            skip_rewrite = True
+        if body.kind == "image" and not skip_rewrite:
+            try:
+                from src.image_prompt_rewrite import rewrite_image_prompt
+                rewrite_info = await rewrite_image_prompt(
+                    body.params.prompt or "",
+                    img2img=bool(params.get("input_image")),
+                )
+                if rewrite_info.get("used_rewrite") and rewrite_info.get("rewritten"):
+                    params["prompt"] = rewrite_info["rewritten"]
+            except Exception:
+                logger.exception("comfy: image prompt rewrite failed; using original")
         # Which video graph builder to use -- resolved inside the
         # `elif body.kind == "video"` block below when a `model` key is
         # given; stays at this default (Wan, the pre-H3 behaviour) otherwise,
@@ -1534,7 +1564,14 @@ def setup_comfy_routes() -> APIRouter:
         if job.get("prompt_id") is None and job.get("error"):
             raise HTTPException(502, job["error"])
 
-        return {"job_id": job_id, "prompt_id": job.get("prompt_id")}
+        return {
+            "job_id": job_id,
+            "prompt_id": job.get("prompt_id"),
+            "original_prompt": rewrite_info.get("original") or (body.params.prompt or "").strip(),
+            "rewritten_prompt": (rewrite_info.get("rewritten") or rewrite_info.get("original") or ""),
+            "used_rewrite": bool(rewrite_info.get("used_rewrite")),
+            "rewrite_model": rewrite_info.get("model"),
+        }
 
     @router.get("/api/comfy/stream/{job_id}")
     async def comfy_stream(job_id: str, request: Request):

@@ -21,7 +21,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from src.auth_helpers import require_privilege, require_user
-from src.comfy_client import ComfyClient, ComfyError, new_client_id, new_job_id
+from src.comfy_client import ComfyClient, ComfyError, DEFAULT_COMFY_BASE_URL, new_client_id, new_job_id
+from src.settings import get_setting
 from src.comfy_graphs import build_minimax_music3_graph, introspect_graph
 from src.constants import GENERATED_AUDIO_DIR
 from src.generated_audio import GENERATED_AUDIO_RE
@@ -37,6 +38,11 @@ from src.music_backends import (
 from src.url_safety import check_outbound_url
 
 logger = logging.getLogger(__name__)
+
+
+def _comfy_base_url() -> str:
+    return (get_setting("comfy_base_url", DEFAULT_COMFY_BASE_URL) or DEFAULT_COMFY_BASE_URL).strip().rstrip("/")
+
 
 _JOBS: dict[str, dict] = {}
 _JOB_MAX_AGE_SECONDS = 30 * 60
@@ -112,8 +118,7 @@ def _spawn_bg(coro):
 
 
 async def _comfy_reachable() -> Optional[bool]:
-    from routes.comfy_routes import configured_comfy_base_url
-    url = configured_comfy_base_url()
+    url = _comfy_base_url()
     if not url:
         return False
     ok, _reason = check_outbound_url(url)
@@ -218,8 +223,7 @@ def _write_terminal_turn(job: dict) -> None:
 async def _run_comfy_job(job_id: str, graph: dict) -> None:
     job = _JOBS[job_id]
     client_id = new_client_id()
-    from routes.comfy_routes import configured_comfy_base_url, validate_comfy_base_url
-    client = ComfyClient(validate_comfy_base_url(configured_comfy_base_url()))
+    client = ComfyClient(_comfy_base_url())
     try:
         job["status"] = "running"
         async with __import__("contextlib").aclosing(client.run_and_stream(graph, client_id)) as stream:
@@ -473,6 +477,11 @@ def setup_music_routes() -> APIRouter:
     async def music_generate(request: Request, body: MusicGenerateRequest):
         require_privilege(request, "can_generate_images")
         owner = _require_user(request)
+        try:
+            from routes.gpu_routes import _load_helper
+            await _load_helper().prepare_for("music")
+        except Exception:
+            logger.warning("gpu prepare_for(music) skipped", exc_info=True)
         if not music_gen_enabled():
             raise HTTPException(503, "Music generation is disabled")
         reachable = await _comfy_reachable()
@@ -562,10 +571,9 @@ def setup_music_routes() -> APIRouter:
         prompt_id = job.get("prompt_id")
         if prompt_id:
             try:
-                from routes.comfy_routes import configured_comfy_base_url, validate_comfy_base_url
-                url = configured_comfy_base_url()
+                url = _comfy_base_url()
                 if url:
-                    await ComfyClient(validate_comfy_base_url(url)).cancel(prompt_id)
+                    await ComfyClient(url).cancel(prompt_id)
             except Exception:
                 logger.warning("music cancel: comfy interrupt failed", exc_info=True)
         _write_terminal_turn(job)

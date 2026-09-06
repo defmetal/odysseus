@@ -17,6 +17,7 @@ one(s) relevant to your task** (don't load them all every time):
 | `data/studio/ODYSSEUS.md` | working on the platform — Docker/GPU/Ollama/auth/LAN config, the agent/tool/skill system, the codebase patches, the big gotchas |
 | `data/studio/TRAINING-GUIDE.md` | curating datasets / training LoRAs — faces, hair, backdrops, character LoRAs, outfit-changeable characters, caption discipline |
 | `data/studio/OPERATIONS.md` | running it day-to-day — generate, reboot, serve, sync the repo, troubleshoot |
+| `data/studio/LIVE-STACK.md` | **current live ports/LoRAs/locks (2026-09-06)** — read before generate/park/train |
 | `data/studio/V2-WISHLIST.md` | gathering more training stills (what's underrepresented) |
 | `data/studio/UPGRADES-2026.md` | planning future upgrades — ComfyUI/ControlNet, video (Wan 2.2/LTX-2), web-search/RAG. Research-backed w/ sources (by Cowork); has a 2026-06-20 status header on what's already done |
 | `data/studio/UPSTREAM-MERGE-PENDING.md` | doing the big upstream sync — fork is 344 commits behind (mostly security/stability + a `tool_implementations.py`→`src/tools/` refactor). The merge playbook: changelog, the 4 conflicts, which studio patches re-home where, the Python-3.14 track, execution steps + rollback, and who-does-it (Cowork preps, Claude Code executes) |
@@ -25,82 +26,78 @@ one(s) relevant to your task** (don't load them all every time):
 (`data/` is gitignored — these exist on this machine but not in a fresh clone.
 `HANDOFF.md`/`README.md` are earlier drafts; the table above is authoritative.)
 
-Suggested first read for a fresh agent: ARCHITECTURE.md then ODYSSEUS.md.
+Suggested first read for a fresh agent: LIVE-STACK.md, then ARCHITECTURE.md / ODYSSEUS.md.
 
-## The current stack (as of 2026-08-02)
-- **Image model: Z-Image-Base, FP8, served by `scripts/diffusion_server.py` on
-  port 8100** with style LoRA `data/studio/training/toei90s_zbase_v4_1/
-  toei90s_zbase_v4_1.safetensors` PLUS `--characters-config data/studio/scripts/
-  characters.json` (character LoRAs, e.g. tetsuya_oc → char v5 fused at 1.0 w/
-  style_weight 0.75; fuse-then-quantize per variant), launched `--guidance 4.5
-  --steps 30 --quantize-fp8 --style-config data/studio/scripts/styles.json
-  --idle-unload-seconds 300` (see data/studio/scripts/start-studio.sh — the
-  authoritative launch args). (v2 kept as fallback; beat Turbo in an A/B.)
-  The server AUTO-STARTS with the container (docker/studio.yml overlay
-  → `data/studio/scripts/start-studio.sh`) — no manual launch needed.
-- **Style trigger is automatic** — the server auto-prepends `toei90s style,
-  smoon` (or maps "90s anime"/"cutie honey"/etc. via `styles.json`). Never type
-  the trigger; just describe the scene.
-- **Two model ids, one server (general mode):** `/v1/models` advertises
-  `Z-Image` (styled: LoRA + auto-trigger) AND `Z-Image-General` (plain Base, no
-  LoRA, no trigger — for non-studio/general images). Pick either in the Chat-tab
-  model dropdown; the server swap-LOADS the chosen variant on demand. Because FP8
-  fuses the LoRA at load, the two can't co-reside in one copy, so switching
-  styled↔general costs a ~1-2 min reload (same as the LLM/ControlNet GPU swap);
-  within a variant it's instant. Logic lives in `scripts/diffusion_server.py`
-  (`_resolve_variant`/`_with_model` swap + `_variant`-gated `_styled`/`load_model`).
-  Endpoint `bc38130a` `cached_models` must list both ids for the dropdown to show
-  `Z-Image-General`.
-- **LLMs (all Ollama @ host.docker.internal:11434, wired in data/settings.json):**
-  default chat = `huihui_ai/Qwen3.6-abliterated:27b` (UNCENSORED — no fiction
-  refusals), utility = `qwen3.5:4b`, vision/agent = `huihui_ai/qwen3-vl-abliterated:8b`
-  (UNCENSORED), research/deep-research = `qwen3.6:35B-A3b` (kept STOCK — MoE
-  abliteration hurts reasoning). Fiction specialist `cydonia-24b` (best prose) is
-  selectable in the model dropdown. `teacher_enabled=false` (stops the loop that
-  auto-wrote junk image skills). Image gen itself has NO content filter.
-- **GPU auto-swap (32 GB can't hold the image model + a big LLM at once):** the
-  image server idle-unloads after 5 min (or `POST :8100/admin/unload` to free
-  VRAM now); Ollama auto-swaps its own models. So art and heavy-LLM (35B/Cydonia)
-  time-share the GPU — expect a ~1-3 min model-load when switching modes.
-- **Image editing via TOOLS:** `generate_image`, `restyle_image` (img2img on the
-  latest upload), `inpaint_region` (fix a region — "fix her left hand"),
-  `controlnet` (sketch/reference → on-model frame that follows its composition;
-  bf16 swap-in, ~2 min). For RELIABLE one-shot gen, Chat-tab → Z-Image direct beats the agent
-  (the abliterated 8B is a flaky tool-driver).
-- Odysseus runs in Docker (`odysseus-odysseus-1`); LAN at `http://alienwaretv:7000`.
-- **ComfyUI power-bench (2026-07-31): `odysseus-comfyui` container on :8188**
-  (official clone at `data/studio/comfy/ComfyUI`, shares the odysseus torch stack
-  ro; models in `data/studio/comfy/models/` — Wan2.2 I2V fp8 pair for VIDEO,
-  `z_image_bf16` = our Z-Image BASE merged from local shards, studio LoRAs shared
-  via extra_model_paths.yaml). Saved studio workflows in
-  `ComfyUI/user/default/workflows/` ("Studio - …": Tetsuya wide, Style-only BGs,
-  Restyle ANY/as-Tetsuya, New-image-in-style, Ride video). Wan gotchas + detail:
-  `data/studio/comfy/` + BRIDGE.md 2026-07-31 entries. Template tiles with an
-  "API" badge (Wan2.6/2.7) are PAID CLOUD — never use. Comfy renders land in
-  `data/studio/comfy/output/`.
-- **Image/Video tabs (2026-08-04, LIVE): 4-way mode toggle (Chat/Agent/Image/
-  Video) in the web UI, ComfyUI-backed** via `src/comfy_{client,graphs}.py` +
-  `routes/comfy_routes.py` (comfy_base_url default host.docker.internal:8188).
-  Params popup (Simple/Advanced), saved-workflow presets, per-step progress,
-  results land in Gallery with `gen_params` for re-rolls. Upstream RFC drafted:
-  `data/studio/UPSTREAM-RFC-DRAFT.md`.
-- **NVFP4 vLLM serving (2026-08-05): Qwen3.6-27B (67 tok/s) + 35B-A3B (57 tok/s)**
-  on :8500 (container-internal), 131K ctx, fp8 KV, `--reasoning-parser qwen3`
-  (REQUIRED — without it answers hide in thinking and narrated searches re-trigger
-  the text tool parser). MANUAL one-at-a-time serving (~29GB VRAM, excludes image
-  gen): launchers `data/studio/scripts/vllm_serve_{27b,35b}.sh` via
-  `docker exec` (PowerShell) — each SELF-REGISTERS so the dropdown only ever
-  lists the live model. Sleep-mode auto-swap is BUILT but BLOCKED BY WSL (no CUDA
-  VMM); works if this box ever runs native Linux. 13-boot fix chain in BRIDGE.md.
-- **Characters registry:** `tetsuya_oc` (char v5@6000) and `yuki_oc` (v1@6000,
-  gates pending) in `data/studio/scripts/characters.json`. Per-character canon
-  lives at `dataset/characters/<Name>/COLOR_KEY.txt` (usakochiba-signed; the
-  settei-crop factory + grok round playbook is in memory + BRIDGE 2026-08-07).
-- **Fleet north star (2026-08-05):** future Mac = always-on Odysseus host;
-  this box = on-demand CUDA node (image/video/NVFP4/training). Details in
-  Cowork memory; migration is its own session when hardware lands.
-- **Live transparency:** `data/studio/RUNNING.md` = what Cowork has active on
-  this machine right now; `data/studio/_bridge/BRIDGE.md` = the cross-agent log.
+## Current live stack (as of 2026-09-06)
+One-pager truth: `data/studio/LIVE-STACK.md`. Day-to-day park/restore:
+`data/studio/OPERATIONS.md` → **Live generate (:8101)**.
+
+- **Diffusion is on `:8101`** (Z-Image Base + style + characters). **`:8100` is
+  ChromaDB** — never treat it as the image server.
+- **Launch (live):** Z-Image Base + `toei90s_zbase_v4_1` @ **0.75**, guidance
+  **4.5**, steps **40**, `--quantize-fp8`, idle-unload **86400**,
+  `--characters-config` → `data/studio/scripts/characters.json`,
+  `--style-config` → `data/studio/scripts/styles.json`. Template:
+  `data/studio/scripts/start-studio.sh` (auto-starts with the container).
+  **Caveat:** if diffusion is killed, the start-studio restart loop dies —
+  restore **manually as user 1000** with
+  `PYTHONPATH=/app/.local/lib/python3.12/site-packages` (root `python3` has no
+  torch). Exact commands: OPERATIONS.md + skill
+  [Odysseus park restore 8101](sand-workflow:odysseus-park-restore-8101).
+- **Style trigger is automatic** — server auto-prepends `toei90s style, smoon`
+  (or maps aliases via `styles.json`). Never type the trigger; describe the scene.
+- **Live characters (do not cut over without Austin/Ada):**
+  `yuki_oc` → `yuki_char_v5`, `tetsuya_oc` → `tetsuya_char_v9` in
+  `characters.json`. Verify paths on disk before generating.
+- **UI `:7000`**, **Comfy `:8188`** (Music 3 + Wan). Music: **MiniMax Music 3
+  local**; 30s one-shots can noise-collapse — use Mixkit/licensed beds for ads.
+- **GPU timeshare:** tab click does **NOT** unload; swap happens on actual
+  generate. Daily coding stays on **Mac 27B** — never park coding LLMs on the
+  5090.
+- **Dual-load identity LoRAs leak faces** — never fuse two character LoRAs on
+  one denoise; use a **three-pass** for real duos.
+- **Tetsuya kit lock:** always biker jacket; tee sometimes; jeans most of the
+  time; when the leg shows, prompt wood with exact phrase
+  `wooden prosthetic right leg visible with brass knee joint` ONLY (character-
+  right; no left / viewer-left). Shorts = stress test only — no more shorts
+  continues / no v12 of the same 3 keepers after v11 two-flesh fail. Live stays
+  **v9**. Full lock: [Marzipan Tetsuya locks](sand-workflow:marzipan-tetsuya-locks).
+- **Julie drop zones:** `dataset\characters\tetsuya\settei_inbox\` (Ada keep/drop
+  first); COLOR_KEY updates → `dataset\color_keys\` (existing per-char keys also
+  exist). LAN `\\AlienwareTV\studio`. Skill:
+  [Marzipan settei inbox](sand-workflow:marzipan-settei-inbox).
+- **Marzipan Slack = Leo only** — skill [Leo Slack](sand-workflow:leo-slack).
+  Renders → `#marzipan-renders`. Never Austin’s Slack connector for Marzipan.
+- **Role ownership:** Ada = character locks/scoring; Odysseus = stack / generate /
+  train; Game Art Director = sheets; Projects Manager = Notion/Slack wiring;
+  Tech Support = Windows/LAN.
+- **Two model ids, one server (general mode):** `/v1/models` advertises `Z-Image`
+  (styled) and `Z-Image-General` (plain Base). Switching styled↔general costs a
+  ~1–2 min reload (FP8 fuses LoRA at load).
+- **LLMs:** Ollama @ host.docker.internal:11434 (and Mac for daily coding). Image
+  gen itself has NO content filter. `teacher_enabled=false`.
+- **Image editing tools:** `generate_image`, `restyle_image`, `inpaint_region`,
+  `controlnet`. Reliable one-shot gen: UI Image/Chat → Z-Image (or skill
+  [Odysseus generate image](sand-workflow:odysseus-generate-image)).
+- Odysseus Docker (`odysseus-odysseus-1`); LAN `http://alienwaretv:7000`.
+- **ComfyUI** (`odysseus-comfyui` on `:8188`): Wan video + MiniMax Music 3; studio
+  workflows under `data/studio/comfy/`. Template tiles with an "API" badge are
+  PAID CLOUD — never use. Comfy output → `data/studio/comfy/output/`.
+- **Live transparency:** `data/studio/RUNNING.md`, `data/studio/_bridge/BRIDGE.md`.
+
+### Shared Grok Bot skills (sand-workflow)
+Use these instead of chat memory for ops:
+
+| Skill id | When |
+|---|---|
+| `leo-slack` | Marzipan Slack as Leo (`/post`, `/upload`) |
+| `odysseus-generate-image` | Stills on `:8101` (seeds, dumps) |
+| `odysseus-park-restore-8101` | Park/restore diffusion before Music/train |
+| `odysseus-lora-continue-train` | Continue-train LoRAs (no cutover until Ada/Austin) |
+| `odysseus-style-only-img2img` | Toei style-only restyle (no identity LoRA) |
+| `marzipan-tetsuya-locks` | Tetsuya kit + wood phrase lock |
+| `marzipan-settei-inbox` | Julie settei/COLOR_KEY drop zones |
+
 
 ## How generation works (for explaining to the user)
 - **Agent chat** (uncensored `qwen3-vl-abliterated:8b`): "generate 3 images of …",
@@ -206,5 +203,4 @@ changes that get the best results here (per Anthropic's Opus 5 prompting guide):
   a fresh cloud clone WON'T have it. A Cowork session must run where `data/` exists (this
   machine) to see ARCHITECTURE/ODYSSEUS/TRAINING-GUIDE/OPERATIONS, or it's flying blind.
 
-CLAUDE.md and AGENTS.md are IDENTICAL copies (keep in sync manually — a Windows
-symlink needs admin). AGENTS.md is for non-Claude-Code tools (e.g. Hermes).
+CLAUDE.md and AGENTS.md are kept in sync (identical). AGENTS.md is for non-Claude-Code tools (e.g. Hermes / Grok Bot). Live facts also live in `data/studio/LIVE-STACK.md`.

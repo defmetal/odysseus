@@ -23,7 +23,8 @@ import slashCommands, { initSlashCommands, isCommand, handleSlashCommand, handle
 import createResearchSynapse from './researchSynapse.js';
 import { createStreamRenderer } from './streamingRenderer.js';
 import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArrowUpRecall.js?v=20260714promptrecall';
-import genParamsModule from './genParams.js';
+import genParamsModule from './genParams.js?v=20260825force1';
+import { prepareGpuFor } from './gpuTimeshare.js?v=20260815timeshare1';
 import {
   createIncrementalDisplayProjector,
   createLiveThinkingThrottle,
@@ -1437,6 +1438,14 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
       return;
     }
 
+    // GPU time-share: Chat/Agent send only (never setMode / tab click).
+    // Banner shows only when a switch is required (local vLLM down).
+    try {
+      const endpointUrl = sessionModule.getCurrentEndpointUrl ? (sessionModule.getCurrentEndpointUrl() || '') : '';
+      const model = sessionModule.getCurrentModel ? (sessionModule.getCurrentModel() || '') : '';
+      await prepareGpuFor(_genMode === 'agent' ? 'agent' : 'chat', { endpointUrl, model });
+    } catch (_) {}
+
     const messageInput = el('message');
     const originalBtnText = submitBtn ? submitBtn.innerHTML : '';
 
@@ -1852,6 +1861,11 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
 	        fd.set('plan_mode', 'false');
 	      }
       fd.append('allow_bash', el('bash-toggle').checked ? 'true' : 'false');
+      const thinkChk = el('think-toggle');
+      fd.append('thinking_enabled', (thinkChk && thinkChk.checked) ? 'true' : 'false');
+      const _thinkState = Storage.loadToggleState() || {};
+      const _effort = _thinkState.reasoning_effort;
+      fd.append('reasoning_effort', (_effort === 'low' || _effort === 'medium' || _effort === 'high') ? _effort : 'medium');
       if (workspaceAgentIntent) fd.set('allow_bash', 'true');
       const ragChk = el('rag-toggle');
       if (ragChk && !ragChk.checked) {

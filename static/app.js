@@ -10,7 +10,7 @@ import modelsModule from './js/models.js?v=20260715startupcalm2';
 import ragModule from './js/rag.js';
 import presetsModule from './js/presets.js';
 import searchModule from './js/search.js';
-import chatModule from './js/chat.js?v=20260801fix1';
+import chatModule from './js/chat.js?v=20260825force1';
 import genParamsModule from './js/genParams.js';
 import compareModule from './js/compare/index.js?v=20260723compareicon2';
 import documentModule from './js/document.js?v=20260722emailfastindex1';
@@ -1823,9 +1823,14 @@ function initializeEventListeners() {
     // rather than hardcoding display:'', so a user who hid this button via
     // Customize UI doesn't see it reappear just by leaving Image/Video mode.
     const researchOverflowBtn = el('overflow-research-btn');
-    if (researchOverflowBtn) {
-      if (isGenMode) researchOverflowBtn.style.display = 'none';
-      else if (typeof applyUIVis === 'function' && typeof loadUIVis === 'function') applyUIVis(loadUIVis());
+    const thinkBtn = el('think-toggle-btn');
+    const thinkEffort = el('think-effort');
+    if (isGenMode) {
+      if (researchOverflowBtn) researchOverflowBtn.style.display = 'none';
+      if (thinkBtn) thinkBtn.style.display = 'none';
+      if (thinkEffort) thinkEffort.style.display = 'none';
+    } else if (typeof applyUIVis === 'function' && typeof loadUIVis === 'function') {
+      applyUIVis(loadUIVis());
     }
   }
 
@@ -1850,6 +1855,12 @@ function initializeEventListeners() {
     if (currentMode !== 'agent') {
       const bashBtn = el('bash-toggle-btn');
       if (bashBtn) bashBtn.style.display = 'none';
+    }
+    if (currentMode === 'image' || currentMode === 'video' || currentMode === 'music') {
+      const thinkBtn = el('think-toggle-btn');
+      const thinkEffort = el('think-effort');
+      if (thinkBtn) thinkBtn.style.display = 'none';
+      if (thinkEffort) thinkEffort.style.display = 'none';
     }
 
     function setMode(mode) {
@@ -2033,6 +2044,65 @@ function initializeEventListeners() {
   }
   setupToggle('web-toggle-btn', 'web-toggle', 'web');
   setupToggle('bash-toggle-btn', 'bash-toggle', 'bash');
+
+  // Thinking is a chat/agent preference (default ON + Med), not a MODE_TOOL.
+  // Persist independently of Agent/Chat so the last effort survives Think-off.
+  (function initThinkControl() {
+    const btn = el('think-toggle-btn');
+    const chk = el('think-toggle');
+    const effortBox = el('think-effort');
+    if (!btn || !chk) return;
+
+    function loadThinkingOn() {
+      const st = loadToggleState();
+      return st.thinking !== false;
+    }
+    function loadThinkingEffort() {
+      const v = loadToggleState().reasoning_effort;
+      return (v === 'low' || v === 'medium' || v === 'high') ? v : 'medium';
+    }
+    function persistThinking(on, effort) {
+      const st = loadToggleState();
+      st.thinking = !!on;
+      if (effort) st.reasoning_effort = effort;
+      saveToggleState(st);
+    }
+    function syncThinkUI(on, effort) {
+      chk.checked = !!on;
+      btn.classList.toggle('active', !!on);
+      btn.setAttribute('aria-pressed', String(!!on));
+      if (!effortBox) return;
+      const level = effort || loadThinkingEffort();
+      effortBox.querySelectorAll('.think-effort-btn').forEach(b => {
+        const match = b.dataset.effort === level;
+        b.classList.toggle('active', match);
+        b.setAttribute('aria-pressed', String(match));
+      });
+    }
+
+    syncThinkUI(loadThinkingOn(), loadThinkingEffort());
+
+    btn.addEventListener('click', () => {
+      const on = !chk.checked;
+      persistThinking(on, loadThinkingEffort());
+      syncThinkUI(on, loadThinkingEffort());
+      if (uiModule?.showToast) uiModule.showToast(on ? 'Thinking on' : 'Thinking off', 1800);
+    });
+
+    if (effortBox) {
+      effortBox.querySelectorAll('.think-effort-btn').forEach(b => {
+        b.addEventListener('click', () => {
+          const level = b.dataset.effort;
+          if (level !== 'low' && level !== 'medium' && level !== 'high') return;
+          persistThinking(true, level);
+          syncThinkUI(true, level);
+          const label = level === 'medium' ? 'Med' : level.charAt(0).toUpperCase() + level.slice(1);
+          if (uiModule?.showToast) uiModule.showToast('Thinking: ' + label, 1400);
+        });
+      });
+    }
+  })();
+
   try { workspaceModule.initWorkspace(); } catch (_) {}
 
   // Document editor toggle (special: uses module panel, not a checkbox)
@@ -2332,7 +2402,7 @@ function initializeEventListeners() {
     if (!inputLeft || !overflowMenu || !overflowWrapper) return;
 
     // Buttons that can be collapsed (in reverse priority — last collapsed first)
-    const collapsibleIds = ['bash-toggle-btn', 'web-toggle-btn'];
+    const collapsibleIds = ['bash-toggle-btn', 'web-toggle-btn', 'think-toggle-btn'];
     const collapsibleBtns = collapsibleIds.map(id => el(id)).filter(Boolean);
     // Map of toolbar btn id → overflow mirror element (created dynamically)
     const overflowMirrors = new Map();

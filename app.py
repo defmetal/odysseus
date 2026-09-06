@@ -802,6 +802,9 @@ app.include_router(setup_comfy_routes())
 from routes.music_routes import setup_music_routes
 app.include_router(setup_music_routes())
 
+from routes.gpu_routes import setup_gpu_routes
+app.include_router(setup_gpu_routes())
+
 # Persisted image-editor drafts (server-backed projects)
 from routes.editor_draft_routes import setup_editor_draft_routes
 app.include_router(setup_editor_draft_routes())
