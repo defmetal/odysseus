@@ -9,7 +9,9 @@ import { providerLogo, providerLabel } from './providers.js';
 import settingsModule from './settings.js';
 import spinnerModule from './spinner.js';
 import { bindMenuDismiss } from './escMenuStack.js';
+import { loadPanel } from './panels.js';
 import { matchModelKey } from './model/matchKey.js';
+import { getTools } from './appConfig.js';
 
 const SEARCH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
 const REPORT_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>';
@@ -445,8 +447,12 @@ function stripExecutedFence(match, tag, inline, body) {
 
 async function loadExecFenceRegex() {
   try {
-    const res = await fetch('/api/tools', { credentials: 'same-origin' });
-    const data = await res.json();
+    // Shared with admin.js, and — more to the point — with the other copies of
+    // this module: chatRenderer.js is imported under three different ?v= query
+    // strings, so it is instantiated three times per load and used to issue
+    // three identical /api/tools requests. appConfig.js is imported by one
+    // specifier from all of them, so they now share a single fetch.
+    const data = await getTools();
     const tags = (data.tools || [])
       .map((t) => t.id)
       .filter((id) => id && !EXEC_FENCE_NON_TOOL.has(id));
@@ -1367,7 +1373,7 @@ document.addEventListener('click', function(e) {
       } catch {}
     });
   } else if (kind === 'document') {
-    import('./document.js?v=20260722emailfastindex1').then(mod => {
+    import('./document.js?v=20260815approvalsave1').then(mod => {
       const open = mod.loadDocument
         || mod.openDocument
         || (mod.default && (mod.default.loadDocument || mod.default.openDocument));
@@ -1389,7 +1395,7 @@ document.addEventListener('click', function(e) {
       if (open) open(id);
     }).catch(() => {});
   } else if (kind === 'email') {
-    import('./emailLibrary.js?v=20260722emailfastindex1').then(mod => {
+    import('./emailLibrary.js?v=20260815approvalsave1').then(mod => {
       const open = mod.openEmailLibrary || (mod.default && mod.default.openEmailLibrary);
       if (open) open({ uid: id });
     }).catch(() => {});
@@ -1548,7 +1554,7 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
     try {
       const [galleryMod, editorMod] = await Promise.all([
         import('./gallery.js'),
-        import('./galleryEditor.js'),
+        loadPanel('editor'),
       ]);
       // Ensure the Gallery modal is open so the editor has a container
       // to render into; switch its tabs to the Edit tab.
@@ -2405,6 +2411,42 @@ export function removeAskUserCards(root) {
   scope.querySelectorAll('.ask-user-card').forEach((node) => node.remove());
 }
 
+// While a choice card is visible, let plain 1–3 activate the corresponding
+// rendered option. Reuse the option's click path so the question keeps its
+// existing submission semantics. Tool approval cards are excluded: that card
+// exists to make consent deliberate after untrusted context influenced the
+// run, and its first option is the widest grant, so a stray digit must not
+// answer it.
+function _handleAskUserShortcut(event) {
+  if (
+    event.defaultPrevented
+    || event.repeat
+    || event.isComposing
+    || event.ctrlKey
+    || event.altKey
+    || event.metaKey
+    || event.shiftKey
+  ) return;
+  if (!/^[1-3]$/.test(event.key)) return;
+
+  const target = event.target;
+  if (target?.closest?.('input, textarea, select, [contenteditable="true"]')) return;
+
+  const focusedCard = document.activeElement?.closest?.('.ask-user-card') || null;
+  const mainCard = document.querySelector('#chat-history .ask-user-card');
+  const compareCards = document.querySelectorAll('.compare-pane .ask-user-card');
+  const card = focusedCard || mainCard || (compareCards.length === 1 ? compareCards[0] : null);
+  if (!card) return;
+  if (card.dataset.askUserKind === 'tool_approval') return;
+  const option = card.querySelectorAll('.ask-user-option')[Number(event.key) - 1];
+  if (!option || option.disabled) return;
+
+  event.preventDefault();
+  option.click();
+}
+
+document.addEventListener('keydown', _handleAskUserShortcut);
+
 /**
  * Render an ask_user payload as a durable choice card.
  *
@@ -2414,11 +2456,15 @@ export function removeAskUserCards(root) {
  */
 export function renderAskUserCard(payload, options) {
   const aq = payload || {};
+  if (aq.resolved) return null;
   const opts = Array.isArray(aq.options) ? aq.options : [];
-  const chatBox = document.getElementById('chat-history');
+  const renderOptions = options || {};
+  const chatBox = renderOptions.root || document.getElementById('chat-history');
+  const onSubmit = typeof renderOptions.onSubmit === 'function'
+    ? renderOptions.onSubmit
+    : null;
   if (!chatBox || !aq.question || opts.length < 2) return null;
 
-  const renderOptions = options || {};
   removeAskUserCards(chatBox);
 
   const card = document.createElement('div');
@@ -2426,6 +2472,8 @@ export function renderAskUserCard(payload, options) {
   card.setAttribute('role', 'group');
   card.tabIndex = -1;
   const multi = !!aq.multi;
+  const isToolApproval = aq.kind === 'tool_approval' && !!aq.approval_id;
+  card.dataset.askUserKind = isToolApproval ? 'tool_approval' : 'question';
   const emojiText = (value) => svgifyEmoji(uiModule.esc(String(value)));
 
   const head = document.createElement('div');
@@ -2434,7 +2482,6 @@ export function renderAskUserCard(payload, options) {
   closeBtn.type = 'button';
   closeBtn.className = 'modal-close ask-user-close';
   closeBtn.setAttribute('aria-label', 'Dismiss question');
-  closeBtn.textContent = '×';
   closeBtn.addEventListener('click', () => {
     card.remove();
     const input = uiModule.el('message');
@@ -2450,12 +2497,44 @@ export function renderAskUserCard(payload, options) {
   card.appendChild(question);
   card.setAttribute('aria-labelledby', question.id);
 
+  if (isToolApproval && aq.action) {
+    const action = document.createElement('div');
+    action.className = 'ask-user-option-desc';
+    const effects = Array.isArray(aq.action.effects)
+      ? aq.action.effects.join(', ')
+      : '';
+    action.textContent = [
+      aq.action.tool || 'tool',
+      aq.action.content || '',
+      effects ? `Effects: ${effects}` : '',
+      aq.action.workspace ? `Workspace: ${aq.action.workspace}` : '',
+      aq.action.document_id ? `Document: ${aq.action.document_id}` : '',
+      aq.action.document_version != null
+        ? `Document version: ${aq.action.document_version}`
+        : '',
+      aq.action.digest ? `Approval fingerprint: ${aq.action.digest}` : '',
+    ].filter(Boolean).join('\n');
+    action.style.whiteSpace = 'pre-wrap';
+    card.appendChild(action);
+  }
+
   const list = document.createElement('div');
   list.className = 'ask-user-options';
   card.appendChild(list);
 
   const send = (text) => {
     if (!text) return;
+    if (onSubmit) {
+      const accepted = onSubmit({
+        kind: 'answer',
+        text,
+        label: text,
+        payload: aq,
+        card,
+      });
+      if (accepted !== false) card.remove();
+      return;
+    }
     card.remove();
     const input = uiModule.el('message');
     if (input) input.value = text;
@@ -2487,7 +2566,32 @@ export function renderAskUserCard(payload, options) {
     }
     if (!multi) {
       row.type = 'button';
-      row.addEventListener('click', () => send(label));
+      row.addEventListener('click', () => {
+        if (isToolApproval) {
+          const detail = {
+            approval_id: aq.approval_id,
+            decision: String((opt && opt.value) || '').toLowerCase(),
+            label,
+            document_id: aq.action && aq.action.document_id
+              ? String(aq.action.document_id)
+              : '',
+          };
+          if (onSubmit) {
+            const accepted = onSubmit({
+              kind: 'tool_approval',
+              ...detail,
+              payload: aq,
+              card,
+            });
+            if (accepted !== false) card.remove();
+          } else {
+            card.remove();
+            document.dispatchEvent(new CustomEvent('odysseus:tool-approval', { detail }));
+          }
+        } else {
+          send(label);
+        }
+      });
     }
     list.appendChild(row);
   });
@@ -2523,7 +2627,7 @@ export function renderAskUserCard(payload, options) {
   });
   other.appendChild(otherInput);
   other.appendChild(otherSend);
-  card.appendChild(other);
+  if (!isToolApproval) card.appendChild(other);
 
   chatBox.appendChild(card);
   if (renderOptions.scroll !== false) {
@@ -2573,7 +2677,7 @@ export function addMessage(role, content, modelName, metadata) {
 
       const toolsByRound = {};
       for (const ev of toolEvents) {
-        const r = ev.round || 1;
+        const r = ev.round ?? 1;
         if (!toolsByRound[r]) toolsByRound[r] = [];
         toolsByRound[r].push(ev);
       }
@@ -2581,9 +2685,12 @@ export function addMessage(role, content, modelName, metadata) {
       const toolRounds = Object.keys(toolsByRound).map(Number);
       const maxRound = Math.max(toolRounds.length ? Math.max(...toolRounds) : 0, roundTexts.length);
 
-      for (let r = 0; r < maxRound; r++) {
-        const roundNum = r + 1;
-        const txt = resolveDocumentPlaceholderLinks((roundTexts[r] || '').trim(), metadata);
+      const firstRound = (toolsByRound[0] || []).length ? 0 : 1;
+      for (let roundNum = firstRound; roundNum <= maxRound; roundNum++) {
+        const r = roundNum - 1;
+        const txt = r >= 0
+          ? resolveDocumentPlaceholderLinks((roundTexts[r] || '').trim(), metadata)
+          : '';
 
         if (txt) {
           const wrap = document.createElement('div');
@@ -2665,7 +2772,7 @@ export function addMessage(role, content, modelName, metadata) {
             box.appendChild(threadWrap);
           }
           for (const ev of roundTools) {
-            if (ev.ask_user) pendingAskUser = ev.ask_user;
+            if (ev.ask_user && !ev.ask_user.resolved) pendingAskUser = ev.ask_user;
             const ok = (ev.exit_code === 0 || ev.exit_code == null);
             let outHtml = '';
             if (ev.output && ev.output.trim()) {
