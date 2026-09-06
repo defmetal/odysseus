@@ -1,0 +1,17 @@
+{
+  "name": "Odysseus",
+  "install": "bash .cursor/install.sh",
+  "terminals": [
+    {
+      "name": "odysseus-server",
+      "command": "LOCALHOST_BYPASS=true ./venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 7000",
+      "description": "Odysseus FastAPI web app (http://127.0.0.1:7000). LOCALHOST_BYPASS lets loopback requests skip login on this dev-only, loopback-bound VM."
+    }
+  ],
+  "ports": [
+    {
+      "name": "odysseus-web",
+      "port": 7000
+    }
+  ]
+}
